@@ -322,4 +322,35 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 		VALIDATION_OPTION				\
 	}
 
+/* --------------------------------------------------------------------------
+ * PocketForge: Override build-options constants to match vendor UM blobs.
+ *
+ * The Allwinner-internal DDK 1.19 rgx_options.h has DIFFERENT bit assignments
+ * than the DC-DeepComputing variant above. The vendor pvrsrvkm.ko presents
+ * build-options word 0x0060d13d; the closed UM .so blobs present the same
+ * word. The runtime check at PVRSRVConnectKM (srvcore.c) masks both sides
+ * with RGX_BUILD_OPTIONS_MASK_KM and rejects any mismatch.
+ *
+ * Since individual -D flags would set the WRONG semantic bits (e.g. bit 0
+ * is NO_HARDWARE in DC layout but means something else in the Allwinner
+ * internal layout), the ONLY safe approach is to override the final constants
+ * so the KM presents the exact word the UM expects.
+ *
+ * The MASK_KM override adds bits 21-22 (Allwinner-internal flags) to the
+ * mask range so srvcore.c does not strip them from the client options word
+ * (which would cause a guaranteed mismatch). Bit 2 (UNUSED1) is excluded
+ * from the mask, same as the DC source.
+ *
+ * Source: logs/pvrsrvkm-buildopts-vendor.txt (M2.A.4 capture)
+ * Bead:   tsp-cv7.3.4
+ * ----------------------------------------------------------------------- */
+#undef  RGX_BUILD_OPTIONS_KM
+#define RGX_BUILD_OPTIONS_KM      0x0060d13dUL
+
+#undef  RGX_BUILD_OPTIONS_MASK_KM
+#define RGX_BUILD_OPTIONS_MASK_KM 0x0060fffbUL
+
+#undef  RGX_BUILD_OPTIONS
+#define RGX_BUILD_OPTIONS         (RGX_BUILD_OPTIONS_KM)
+
 #endif /* RGX_OPTIONS_H */

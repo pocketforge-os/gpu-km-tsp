@@ -77,6 +77,17 @@ ifeq ($(PVR_SYSTEM),sunxi_a133)
   RGX_BNC ?= 22.102.54.38
   WINDOW_SYSTEM=nullws
   include $(DDK_SRC)/config_kernel_sunxi_a133.mk
+
+  # Include vendor build-options CFLAGS from image/build/pvr-buildopts.mk.
+  # PVR_BUILDOPTS_MK can be overridden; default looks for the image repo
+  # as a sibling checkout (../image/) or via /work/src/image/ in container.
+  PVR_BUILDOPTS_MK ?= $(wildcard $(DDK_SRC)/../image/build/pvr-buildopts.mk)
+  ifeq ($(PVR_BUILDOPTS_MK),)
+    PVR_BUILDOPTS_MK := $(wildcard /work/src/image/build/pvr-buildopts.mk)
+  endif
+  ifneq ($(PVR_BUILDOPTS_MK),)
+    include $(PVR_BUILDOPTS_MK)
+  endif
 else
   # StarFive JH7110 (upstream default)
   TARGET_PRIMARY_ARCH=target_riscv64
@@ -126,6 +137,8 @@ ifeq ($(PVR_SYSTEM),sunxi_a133)
    -I$(DDK_SRC)/services/server/include \
    -I$(DDK_SRC)/services/include \
    -I$(DDK_SRC)/include
+  # Functional CFLAGS from pvr-buildopts.mk (code-path selection, not bitmask)
+  ccflags-y += $(PVR_KM_CFLAGS)
 else
   ccflags-y += \
    -include $(srctree)/drivers/gpu/drm/img/kernel_config_compatibility.h \
