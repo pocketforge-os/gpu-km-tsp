@@ -1,0 +1,297 @@
+# release.yml — GPU KM (pvrsrvkm.ko + dc_sunxi.ko) reproducible release build
+#
+# Trigger: push of tags matching tsp-pvr-*
+# Runner:  self-hosted Dell runner (has kubo for IPFS publishing)
+# Purpose: reproducible build of GPU kernel modules, sign with PocketForge
+#          release key, publish to GitHub Releases + IPFS via vendor-manifest.
+#
+# Tag format: tsp-pvr-1.19.6345021-YYYY.MM.DD-<short-sha>
+#   e.g. tsp-pvr-1.19.6345021-2026.06.15-a6a1529
+#
+# Reproducibility: SA-5 verified that the DDK build pipeline produces
+# bit-for-bit identical .ko files across clean builds with NO env vars
+# needed (unlike kernel-tsp which requires SOURCE_DATE_EPOCH etc.). The
+# pipeline doesn't embed wall-clock timestamps or utsname(). This workflow
+# builds twice and verifies identical SHA-256 as a gate.
+#
+# Dependencies:
+#   - kernel-tsp: cloned + prepared for module headers
+#   - minisign: for release-key signing (RELEASE_SECRET_KEY_FILE secret)
+#   - kubo: for IPFS publishing (Dell runner has ipfs.service)
+#
+# Bead: tsp-cv7.3.5
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'tsp-pvr-*'
+
+env:
+  CROSS_COMPILE: aarch64-none-linux-gnu-
+
+jobs:
+  release:
+    name: Build, verify, sign, publish
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout gpu-km-tsp
+        uses: actions/checkout@v4
+
+      - name: Parse tag metadata
+        id: meta
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          # Extract short SHA from tag name (last component after -)
+          SHORT_SHA="${TAG##*-}"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Tag: ${TAG}, Short SHA: ${SHORT_SHA}"
+
+      - name: Verify toolchain
+        run: |
+          set -eux
+          # The Dell runner should have the ARM toolchain installed or
+          # available via the build container. Check PATH first.
+          if command -v ${CROSS_COMPILE}gcc >/dev/null 2>&1; then
+            ${CROSS_COMPILE}gcc --version | head -1
+          else
+            echo "ERROR: ${CROSS_COMPILE}gcc not found in PATH."
+            echo "Install the ARM A-Profile Toolchain 10.3-2021.07 or"
+            echo "add /opt/arm-10.3-2021.07/bin to PATH."
+            exit 1
+          fi
+
+      - name: Clone kernel-tsp
+        run: |
+          git clone --depth=1 https://github.com/pocketforge-os/kernel-tsp.git \
+            /tmp/kernel-tsp
+
+      - name: Prepare kernel headers
+        working-directory: /tmp/kernel-tsp
+        run: |
+          set -eux
+          make ARCH=arm64 CROSS_COMPILE=${CROSS_COMPILE} pocketforge_tsp_defconfig
+          make ARCH=arm64 CROSS_COMPILE=${CROSS_COMPILE} prepare modules_prepare \
+            HOST_EXTRACFLAGS="-fcommon" -j$(nproc)
+
+      # -----------------------------------------------------------------------
+      # Build 1 — primary build
+      # -----------------------------------------------------------------------
+      - name: "Build 1: GPU modules"
+        run: |
+          set -eux
+          make -C /tmp/kernel-tsp \
+            M="$PWD" \
+            ARCH=arm64 \
+            CROSS_COMPILE=${CROSS_COMPILE} \
+            CONFIG_DRM_IMG_ROGUE=m \
+            modules -j$(nproc)
+
+      - name: "Build 1: record checksums"
+        id: build1
+        run: |
+          set -eux
+          B1_PVRSRVKM=$(sha256sum pvrsrvkm.ko | cut -d' ' -f1)
+          B1_DC_SUNXI=$(sha256sum dc_sunxi.ko | cut -d' ' -f1)
+          echo "pvrsrvkm_sha256=${B1_PVRSRVKM}" >> "$GITHUB_OUTPUT"
+          echo "dc_sunxi_sha256=${B1_DC_SUNXI}" >> "$GITHUB_OUTPUT"
+          echo "Build 1 pvrsrvkm.ko: ${B1_PVRSRVKM}"
+          echo "Build 1 dc_sunxi.ko: ${B1_DC_SUNXI}"
+
+      - name: "Build 1: stash artifacts"
+        run: |
+          mkdir -p /tmp/build1
+          cp pvrsrvkm.ko dc_sunxi.ko /tmp/build1/
+
+      # -----------------------------------------------------------------------
+      # Build 2 — reproducibility verification
+      # -----------------------------------------------------------------------
+      - name: "Build 2: clean"
+        run: |
+          make -C /tmp/kernel-tsp \
+            M="$PWD" \
+            ARCH=arm64 \
+            CROSS_COMPILE=${CROSS_COMPILE} \
+            CONFIG_DRM_IMG_ROGUE=m \
+            clean
+
+      - name: "Build 2: GPU modules"
+        run: |
+          set -eux
+          make -C /tmp/kernel-tsp \
+            M="$PWD" \
+            ARCH=arm64 \
+            CROSS_COMPILE=${CROSS_COMPILE} \
+            CONFIG_DRM_IMG_ROGUE=m \
+            modules -j$(nproc)
+
+      - name: "Build 2: verify reproducibility"
+        run: |
+          set -eux
+          B2_PVRSRVKM=$(sha256sum pvrsrvkm.ko | cut -d' ' -f1)
+          B2_DC_SUNXI=$(sha256sum dc_sunxi.ko | cut -d' ' -f1)
+          echo "Build 2 pvrsrvkm.ko: ${B2_PVRSRVKM}"
+          echo "Build 2 dc_sunxi.ko: ${B2_DC_SUNXI}"
+
+          B1_PVRSRVKM="${{ steps.build1.outputs.pvrsrvkm_sha256 }}"
+          B1_DC_SUNXI="${{ steps.build1.outputs.dc_sunxi_sha256 }}"
+
+          if [ "${B1_PVRSRVKM}" != "${B2_PVRSRVKM}" ]; then
+            echo "FATAL: pvrsrvkm.ko NOT reproducible!"
+            echo "  Build 1: ${B1_PVRSRVKM}"
+            echo "  Build 2: ${B2_PVRSRVKM}"
+            exit 1
+          fi
+          if [ "${B1_DC_SUNXI}" != "${B2_DC_SUNXI}" ]; then
+            echo "FATAL: dc_sunxi.ko NOT reproducible!"
+            echo "  Build 1: ${B1_DC_SUNXI}"
+            echo "  Build 2: ${B2_DC_SUNXI}"
+            exit 1
+          fi
+          echo "Reproducibility PASSED: both .ko files are bit-for-bit identical."
+
+      # -----------------------------------------------------------------------
+      # Use Build 1 artifacts for release (identical to Build 2)
+      # -----------------------------------------------------------------------
+      - name: Stage release artifacts
+        run: |
+          set -eux
+          mkdir -p /tmp/release
+          cp /tmp/build1/pvrsrvkm.ko /tmp/release/
+          cp /tmp/build1/dc_sunxi.ko /tmp/release/
+
+          # Module info for release notes
+          modinfo /tmp/release/pvrsrvkm.ko 2>/dev/null \
+            | grep -E "^(vermagic|alias|description)" > /tmp/release/modinfo.txt || true
+          modinfo /tmp/release/dc_sunxi.ko 2>/dev/null \
+            | grep -E "^(vermagic|alias|description)" >> /tmp/release/modinfo.txt || true
+
+          # SHA-256 manifest
+          cd /tmp/release
+          sha256sum pvrsrvkm.ko dc_sunxi.ko > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # -----------------------------------------------------------------------
+      # Sign with PocketForge release key (minisign)
+      # -----------------------------------------------------------------------
+      - name: Sign artifacts
+        if: env.RELEASE_SECRET_KEY_FILE != ''
+        env:
+          RELEASE_SECRET_KEY_FILE: ${{ secrets.RELEASE_SECRET_KEY_FILE }}
+        run: |
+          set -eux
+
+          # Write the secret key to a temp file
+          KEY_FILE=$(mktemp)
+          echo "${RELEASE_SECRET_KEY_FILE}" > "${KEY_FILE}"
+          trap 'rm -f "${KEY_FILE}"' EXIT
+
+          # Sign each artifact
+          for f in pvrsrvkm.ko dc_sunxi.ko SHA256SUMS.txt; do
+            minisign -S -s "${KEY_FILE}" \
+              -m "/tmp/release/${f}" \
+              -t "PocketForge gpu-km-tsp ${{ steps.meta.outputs.tag }}"
+          done
+
+          echo "Signed artifacts:"
+          ls -la /tmp/release/*.sig /tmp/release/*.minisig 2>/dev/null || true
+
+      # -----------------------------------------------------------------------
+      # Publish to GitHub Releases
+      # -----------------------------------------------------------------------
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eux
+          TAG="${{ steps.meta.outputs.tag }}"
+
+          # Collect all release files
+          RELEASE_FILES=(/tmp/release/pvrsrvkm.ko /tmp/release/dc_sunxi.ko /tmp/release/SHA256SUMS.txt)
+          # Include signatures if they exist
+          for sig in /tmp/release/*.minisig /tmp/release/*.sig; do
+            [ -f "$sig" ] && RELEASE_FILES+=("$sig")
+          done
+
+          PVRSRVKM_SHA="${{ steps.build1.outputs.pvrsrvkm_sha256 }}"
+          DC_SUNXI_SHA="${{ steps.build1.outputs.dc_sunxi_sha256 }}"
+
+          NOTES=$(cat <<'NOTES_EOF'
+          ## GPU Kernel Modules — DDK 1.19 for TrimUI Smart Pro
+
+          PowerVR Rogue GE8300 (BVNC 22.102.54.38) kernel modules built from
+          DDK 1.19 source with PocketForge sunxi_a133 system layer.
+
+          ### Artifacts
+          - `pvrsrvkm.ko` — PowerVR Services kernel module
+          - `dc_sunxi.ko` — Allwinner display controller module
+
+          ### Checksums (SHA-256)
+          ```
+          NOTES_EOF
+          )
+          NOTES+=$'\n'"${PVRSRVKM_SHA}  pvrsrvkm.ko"
+          NOTES+=$'\n'"${DC_SUNXI_SHA}  dc_sunxi.ko"
+          NOTES+=$'\n''```'
+          NOTES+=$'\n\n'"### Reproducibility"
+          NOTES+=$'\n'"Two clean builds verified bit-for-bit identical (no SOURCE_DATE_EPOCH needed)."
+          NOTES+=$'\n\n'"### Build info"
+          NOTES+=$'\n'"$(cat /tmp/release/modinfo.txt 2>/dev/null || echo 'modinfo not available')"
+
+          gh release create "${TAG}" \
+            --title "${TAG}" \
+            --notes "${NOTES}" \
+            "${RELEASE_FILES[@]}"
+
+      # -----------------------------------------------------------------------
+      # Publish to IPFS (via kubo on Dell runner)
+      # -----------------------------------------------------------------------
+      - name: Publish to IPFS
+        if: always() && steps.build1.outcome == 'success'
+        run: |
+          set -eux
+
+          # Check if ipfs is available on the runner
+          if ! command -v ipfs >/dev/null 2>&1; then
+            echo "WARNING: ipfs not found, skipping IPFS publishing."
+            echo "Install kubo and configure ipfs.service on the runner."
+            exit 0
+          fi
+
+          IPFS_API="/ip4/127.0.0.1/tcp/5001"
+
+          # Add artifacts to IPFS
+          PVRSRVKM_CID=$(ipfs --api "${IPFS_API}" add -Q --cid-version=1 \
+            --raw-leaves --hash=sha2-256 --chunker=size-1048576 \
+            /tmp/release/pvrsrvkm.ko)
+          DC_SUNXI_CID=$(ipfs --api "${IPFS_API}" add -Q --cid-version=1 \
+            --raw-leaves --hash=sha2-256 --chunker=size-1048576 \
+            /tmp/release/dc_sunxi.ko)
+
+          echo "IPFS CIDs:"
+          echo "  pvrsrvkm.ko: ${PVRSRVKM_CID}"
+          echo "  dc_sunxi.ko: ${DC_SUNXI_CID}"
+
+          # Organize under MFS path /pocketforge-blobs/tsp/gpu-km/<tag>/
+          TAG="${{ steps.meta.outputs.tag }}"
+          MFS_DIR="/pocketforge-blobs/tsp/gpu-km/${TAG}"
+
+          ipfs --api "${IPFS_API}" files mkdir -p "${MFS_DIR}" || true
+          ipfs --api "${IPFS_API}" files cp "/ipfs/${PVRSRVKM_CID}" "${MFS_DIR}/pvrsrvkm.ko" || true
+          ipfs --api "${IPFS_API}" files cp "/ipfs/${DC_SUNXI_CID}" "${MFS_DIR}/dc_sunxi.ko" || true
+
+          echo "IPFS MFS path: ${MFS_DIR}"
+          echo "pvrsrvkm_cid=${PVRSRVKM_CID}" >> "$GITHUB_OUTPUT"
+          echo "dc_sunxi_cid=${DC_SUNXI_CID}" >> "$GITHUB_OUTPUT"
+
+      # -----------------------------------------------------------------------
+      # Cleanup
+      # -----------------------------------------------------------------------
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf /tmp/kernel-tsp /tmp/build1 /tmp/release

@@ -21,6 +21,7 @@ override PVR_BUILD_DIR := sunxi_a133_linux
 override PVR_BUILD_TYPE := release
 override SUPPORT_RGX := 1
 override DISPLAY_CONTROLLER := dc_sunxi
+override SUPPORT_DISPLAY_CLASS := 1
 override PVR_SYSTEM := sunxi_a133
 override PVR_LOADER :=
 override BUILD := release

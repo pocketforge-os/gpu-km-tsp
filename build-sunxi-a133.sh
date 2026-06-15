@@ -24,8 +24,10 @@ KERNELDIR="${1:-$(cd "$SCRIPT_DIR/../kernel-tsp" && pwd)}"
 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-none-linux-gnu-}"
 
 # Auto-detect pvr-buildopts.mk if not explicitly set
-if [ -z "$PVR_BUILDOPTS_MK" ]; then
-    if [ -f "$SCRIPT_DIR/../image/build/pvr-buildopts.mk" ]; then
+if [ -z "${PVR_BUILDOPTS_MK:-}" ]; then
+    if [ -f "$SCRIPT_DIR/build/pvr-buildopts.mk" ]; then
+        PVR_BUILDOPTS_MK="$SCRIPT_DIR/build/pvr-buildopts.mk"
+    elif [ -f "$SCRIPT_DIR/../image/build/pvr-buildopts.mk" ]; then
         PVR_BUILDOPTS_MK="$(cd "$SCRIPT_DIR/../image" && pwd)/build/pvr-buildopts.mk"
     elif [ -f "/work/src/image/build/pvr-buildopts.mk" ]; then
         PVR_BUILDOPTS_MK="/work/src/image/build/pvr-buildopts.mk"
@@ -51,6 +53,7 @@ make -C "$KERNELDIR" \
     ARCH=arm64 \
     CROSS_COMPILE="$CROSS_COMPILE" \
     CONFIG_DRM_IMG_ROGUE=m \
+    PVR_SYSTEM=sunxi_a133 \
     ${PVR_BUILDOPTS_MK:+PVR_BUILDOPTS_MK="$PVR_BUILDOPTS_MK"} \
     modules \
     "$@"
@@ -60,4 +63,7 @@ echo "=== Build complete ==="
 if [ -f "$SCRIPT_DIR/pvrsrvkm.ko" ]; then
     echo "  pvrsrvkm.ko: $(ls -la "$SCRIPT_DIR/pvrsrvkm.ko" | awk '{print $5}') bytes"
     modinfo "$SCRIPT_DIR/pvrsrvkm.ko" 2>/dev/null | grep -E "^(vermagic|alias|description)" || true
+fi
+if [ -f "$SCRIPT_DIR/services/system/rogue/sunxi_a133/dc_sunxi.ko" ]; then
+    echo "  dc_sunxi.ko: $(ls -la "$SCRIPT_DIR/services/system/rogue/sunxi_a133/dc_sunxi.ko" | awk '{print $5}') bytes"
 fi

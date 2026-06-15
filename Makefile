@@ -78,10 +78,15 @@ ifeq ($(PVR_SYSTEM),sunxi_a133)
   WINDOW_SYSTEM=nullws
   include $(DDK_SRC)/config_kernel_sunxi_a133.mk
 
-  # Include vendor build-options CFLAGS from image/build/pvr-buildopts.mk.
-  # PVR_BUILDOPTS_MK can be overridden; default looks for the image repo
-  # as a sibling checkout (../image/) or via /work/src/image/ in container.
-  PVR_BUILDOPTS_MK ?= $(wildcard $(DDK_SRC)/../image/build/pvr-buildopts.mk)
+  # Include vendor build-options CFLAGS from pvr-buildopts.mk.
+  # PVR_BUILDOPTS_MK can be overridden; default search order:
+  #   1. build/pvr-buildopts.mk (in-repo copy, CI-friendly)
+  #   2. ../image/build/pvr-buildopts.mk (sibling checkout)
+  #   3. /work/src/image/build/pvr-buildopts.mk (container bind-mount)
+  PVR_BUILDOPTS_MK ?= $(wildcard $(DDK_SRC)/build/pvr-buildopts.mk)
+  ifeq ($(PVR_BUILDOPTS_MK),)
+    PVR_BUILDOPTS_MK := $(wildcard $(DDK_SRC)/../image/build/pvr-buildopts.mk)
+  endif
   ifeq ($(PVR_BUILDOPTS_MK),)
     PVR_BUILDOPTS_MK := $(wildcard /work/src/image/build/pvr-buildopts.mk)
   endif
@@ -171,3 +176,9 @@ $(PVRSRVKM_NAME)-y += $(foreach _m,$(INTERNAL_EXTRA_KBUILD_OBJECTS:.o=),$($(_m)-
 
 #obj-m += $(INTERNAL_KBUILD_OBJECTS)
 obj-$(CONFIG_DRM_IMG_ROGUE) += $(INTERNAL_KBUILD_OBJECTS)
+
+# dc_sunxi: fbdev-to-PVR-DC bridge (separate .ko, depends on pvrsrvkm)
+ifeq ($(PVR_SYSTEM),sunxi_a133)
+  include $(DDK_SRC)/services/3rdparty/dc_sunxi/Kbuild.mk
+  obj-$(CONFIG_DRM_IMG_ROGUE) += dc_sunxi.o
+endif

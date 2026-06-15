@@ -1,0 +1,118 @@
+# pr-build.yml — GPU KM (pvrsrvkm.ko + dc_sunxi.ko) compile-validation on PRs
+#
+# Trigger: pull_request to main
+# Runner:  hosted (ubuntu-latest)
+# Purpose: build pvrsrvkm.ko + dc_sunxi.ko against pinned kernel-tsp headers;
+#          verify compile succeeds. Required check for branch protection.
+#
+# The build needs a configured kernel-tsp tree for headers. Since kernel-tsp
+# has no releases yet, we clone + prepare it from source. Once kernel-tsp
+# publishes release artifacts, this can switch to downloading a pre-built
+# headers tarball for speed.
+#
+# Bead: tsp-cv7.3.5
+
+name: PR Build
+
+on:
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same PR.
+concurrency:
+  group: pr-build-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # ARM A-Profile Toolchain 10.3-2021.07 (gcc 10.3.1 / glibc 2.33).
+  # NEVER use apt's gcc-aarch64-linux-gnu (glibc 2.34, device rejects it).
+  TOOLCHAIN_URL: https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu-a/10.3-2021.07/binrel/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu.tar.xz
+  TOOLCHAIN_SHA256: 1e33d53dea59c8de823bbdfe0798280bdcd138636c7060da9d77a97ded095a84
+  CROSS_COMPILE: aarch64-none-linux-gnu-
+
+jobs:
+  build:
+    name: Build GPU modules
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout gpu-km-tsp
+        uses: actions/checkout@v4
+
+      - name: Install host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev gcc make
+
+      - name: Cache ARM toolchain
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: /opt/arm-10.3-2021.07
+          key: arm-toolchain-10.3-2021.07-${{ env.TOOLCHAIN_SHA256 }}
+
+      - name: Download ARM toolchain
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          curl -fsSL -o toolchain.tar.xz "$TOOLCHAIN_URL"
+          echo "${TOOLCHAIN_SHA256}  toolchain.tar.xz" | sha256sum -c -
+          sudo mkdir -p /opt
+          sudo tar -xJf toolchain.tar.xz -C /opt
+          sudo mv /opt/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu \
+                   /opt/arm-10.3-2021.07
+          rm toolchain.tar.xz
+
+      - name: Add toolchain to PATH
+        run: echo "/opt/arm-10.3-2021.07/bin" >> "$GITHUB_PATH"
+
+      - name: Verify toolchain
+        run: ${CROSS_COMPILE}gcc --version | head -1
+
+      - name: Clone kernel-tsp
+        run: |
+          git clone --depth=1 https://github.com/pocketforge-os/kernel-tsp.git \
+            /tmp/kernel-tsp
+
+      - name: Prepare kernel headers
+        working-directory: /tmp/kernel-tsp
+        run: |
+          set -eux
+          make ARCH=arm64 CROSS_COMPILE=${CROSS_COMPILE} pocketforge_tsp_defconfig
+          make ARCH=arm64 CROSS_COMPILE=${CROSS_COMPILE} prepare modules_prepare \
+            HOST_EXTRACFLAGS="-fcommon" -j$(nproc)
+
+      - name: Build GPU modules
+        run: |
+          set -eux
+          ./build-sunxi-a133.sh /tmp/kernel-tsp
+
+      - name: Verify artifacts exist
+        run: |
+          set -eux
+          test -f pvrsrvkm.ko
+          test -f dc_sunxi.ko
+          echo "=== pvrsrvkm.ko ==="
+          ls -la pvrsrvkm.ko
+          modinfo pvrsrvkm.ko 2>/dev/null | grep -E "^(vermagic|alias|description)" || true
+          echo "=== dc_sunxi.ko ==="
+          ls -la dc_sunxi.ko
+          modinfo dc_sunxi.ko 2>/dev/null | grep -E "^(vermagic|alias|description)" || true
+
+      - name: Verify vermagic matches kernel
+        run: |
+          set -eux
+          KERNEL_VERSION=$(make -sC /tmp/kernel-tsp ARCH=arm64 kernelrelease)
+          KO_VERMAGIC=$(modinfo pvrsrvkm.ko | grep vermagic | awk '{print $2}')
+          echo "Kernel version: ${KERNEL_VERSION}"
+          echo "Module vermagic: ${KO_VERMAGIC}"
+          if [ "${KO_VERMAGIC}" != "${KERNEL_VERSION}" ]; then
+            echo "ERROR: vermagic mismatch!"
+            exit 1
+          fi
+
+      - name: Print artifact checksums
+        run: |
+          sha256sum pvrsrvkm.ko dc_sunxi.ko

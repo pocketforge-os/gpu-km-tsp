@@ -1318,7 +1318,7 @@ PVRSRV_ERROR RGXGetFwMapping(PVRSRV_RGXDEV_INFO *psDevInfo,
 
 @Return        IMG_BOOL
 ******************************************************************************/
-INLINE IMG_BOOL RGXIsValidWorkloadEstCCBCommand(RGXFWIF_CCB_CMD_TYPE eType);
+IMG_BOOL RGXIsValidWorkloadEstCCBCommand(RGXFWIF_CCB_CMD_TYPE eType);
 
 #endif
 
