@@ -2,17 +2,16 @@
 #define PVRSRV_ENABLE_CCCB_GROW
 #define RGX_FW_FILENAME "rgx.fw"
 #define RGX_SH_FILENAME "rgx.sh"
-#define PVR_SYSTEM_SF7110 1
-#define PVR_BUILD_DIR "sf_7110"
+#define PVR_BUILD_DIR "sunxi_a133_linux"
 #define PVR_BUILD_TYPE "release"
 #define PVRSRV_MODNAME "pvrsrvkm"
 #define PVRSYNC_MODNAME "pvr_sync"
 #define SUPPORT_RGX 1
-#define DISPLAY_CONTROLLER drm_starfive
+#define DISPLAY_CONTROLLER dc_sunxi
 #define PVRSRV_HWPERF_COUNTERS_PERBLK 12
 #define RELEASE
-#define RGX_BVNC_CORE_KM_HEADER "cores/rgxcore_km_36.50.54.182.h"
-#define RGX_BNC_CONFIG_KM_HEADER "configs/rgxconfig_km_36.V.54.182.h"
+#define RGX_BVNC_CORE_KM_HEADER "cores/rgxcore_km_22.102.54.38.h"
+#define RGX_BNC_CONFIG_KM_HEADER "configs/rgxconfig_km_22.V.54.38.h"
 //#define PDUMP
 #define PVRSRV_NEED_PVR_DPF
 //#define PVRSRV_NEED_PVR_ASSERT

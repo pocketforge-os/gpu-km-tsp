@@ -463,21 +463,27 @@ int PVRSRVDeviceResume(struct drm_device *psDev)
 
 int sPVRSRVDeviceSuspend(PVRSRV_DEVICE_NODE *psDeviceNode)
 {
+#if defined(PVR_SYSTEM_SF7110)
 	struct sf7110_cfg *sft = sys_get_privdata();
 
 	if (sft->runtime_suspend != NULL)
 		sft->runtime_suspend(NULL);
-
+#else
+	PVR_UNREFERENCED_PARAMETER(psDeviceNode);
+#endif
 	return 0;
 }
 
 int sPVRSRVDeviceResume(PVRSRV_DEVICE_NODE *psDeviceNode)
 {
+#if defined(PVR_SYSTEM_SF7110)
 	struct sf7110_cfg *sft = sys_get_privdata();
 
 	if (sft->runtime_resume != NULL)
 		sft->runtime_resume(NULL);
-
+#else
+	PVR_UNREFERENCED_PARAMETER(psDeviceNode);
+#endif
 	return 0;
 }
 

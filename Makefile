@@ -57,21 +57,34 @@ INTERNAL_EXTRA_KBUILD_OBJECTS=""
 TOP:=$(dir $(realpath $(lastword $(MAKEFILE_LIST))))
 TOP:=$(TOP:/=)
 BRIDGE_SOURCE_ROOT=$(TOP)/generated/rogue
-TARGET_PRIMARY_ARCH=target_riscv64
+
+# For external module builds (M=), $(srctree)/$(src) doesn't resolve correctly
+# on 4.9 kbuild. Use TOP (resolved from MAKEFILE_LIST) for all source paths.
+DDK_SRC := $(TOP)
 PVR_ARCH=rogue
 PVR_ARCH_DEFS=rogue
-PVR_SYSTEM := sf_7110
+PVR_SYSTEM ?= sf_7110
 #PDUMP ?= 1
 BUILD ?= release
-RGX_BVNC ?= 36.50.54.182
-RGX_BNC ?= 36.50.54.182
 PVRSRV_NEED_PVR_DPF=1
 PVRSRV_NEED_PVR_ASSERT=1
 PVR_SERVICES_DEBUG=1
-WINDOW_SYSTEM=nulldrmws
 
-#include $(OUT)/config_kernel.mk
-include $(srctree)/$(src)/config_kernel.mk
+ifeq ($(PVR_SYSTEM),sunxi_a133)
+  # Allwinner A133 / GE8300 (TrimUI Smart Pro)
+  TARGET_PRIMARY_ARCH=target_aarch64
+  RGX_BVNC ?= 22.102.54.38
+  RGX_BNC ?= 22.102.54.38
+  WINDOW_SYSTEM=nullws
+  include $(DDK_SRC)/config_kernel_sunxi_a133.mk
+else
+  # StarFive JH7110 (upstream default)
+  TARGET_PRIMARY_ARCH=target_riscv64
+  RGX_BVNC ?= 36.50.54.182
+  RGX_BNC ?= 36.50.54.182
+  WINDOW_SYSTEM=nulldrmws
+  include $(DDK_SRC)/config_kernel.mk
+endif
 
 .SECONDARY:
 
@@ -94,15 +107,33 @@ bridge_base := $(BRIDGE_SOURCE_ROOT)
 #ccflags-y += -D__linux__ -include $(OUT)/config_kernel.h \
 # -include kernel_config_compatibility.h \
 # -I$(OUT)/include -I$(TOP)/kernel/drivers/staging/imgtec
-ccflags-y += -D__linux__ -include $(srctree)/$(src)/config_kernel.h \
- -include $(srctree)/drivers/gpu/drm/img/kernel_config_compatibility.h \
+ifeq ($(PVR_SYSTEM),sunxi_a133)
+  ccflags-y += -D__linux__ -include $(DDK_SRC)/config_kernel_sunxi_a133.h
+else
+  ccflags-y += -D__linux__ -include $(DDK_SRC)/config_kernel.h
+endif
+ccflags-y += \
  -I$(OUT)/include \
- -I$(srctree)/drivers/gpu/drm/img \
- -I$(srctree)/$(src)/hwdefs/rogue \
- -I$(srctree)/$(src)/hwdefs/rogue/km
+ -I$(DDK_SRC)/hwdefs/rogue \
+ -I$(DDK_SRC)/hwdefs/rogue/km
 
-include $(srctree)/$(src)/services/server/env/linux/Kbuild.mk
-include $(srctree)/$(src)/services/system/rogue/sf_7110/Kbuild.mk
+ifeq ($(PVR_SYSTEM),sunxi_a133)
+  # sunxi_a133 includes: use DDK's own headers, no drm/img compatibility header
+  ccflags-y += \
+   -I$(DDK_SRC) \
+   -I$(DDK_SRC)/services/system/rogue/sunxi_a133 \
+   -I$(DDK_SRC)/services/system/include \
+   -I$(DDK_SRC)/services/server/include \
+   -I$(DDK_SRC)/services/include \
+   -I$(DDK_SRC)/include
+else
+  ccflags-y += \
+   -include $(srctree)/drivers/gpu/drm/img/kernel_config_compatibility.h \
+   -I$(srctree)/drivers/gpu/drm/img
+endif
+
+include $(DDK_SRC)/services/server/env/linux/Kbuild.mk
+include $(DDK_SRC)/services/system/rogue/$(PVR_SYSTEM)/Kbuild.mk
 
 #include $(INTERNAL_KBUILD_MAKEFILES)
 
