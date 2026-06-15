@@ -1,0 +1,32 @@
+# gpu-km-tsp
+
+PocketForge-owned PowerVR DDK 1.19 kernel module fork for GE8300
+(sun50iw10/A133).
+
+## License
+
+This repository contains source code under dual licensing:
+
+- **Most files**: Dual MIT/GPLv2 (Imagination Technologies Ltd.)
+  See `MIT-COPYING` and `GPL-COPYING`.
+- **Public API headers** (`include/public/powervr/`): MIT only
+  (Imagination Technologies Ltd.)
+- **MediaTek platform files** (`services/system/rogue/mt8173/`):
+  GPL-2.0 (MediaTek Inc.) -- not used by PocketForge.
+- **PocketForge-authored files** (e.g. `services/system/rogue/sunxi_a133/`):
+  Dual MIT/GPLv2, matching upstream convention.
+- **Auto-generated config files** (`config_kernel.h`, `config_kernel.mk`):
+  No separate license header; covered by the repository's dual MIT/GPLv2.
+
+When in doubt, check the individual file header. Each Imagination source
+file carries an explicit `@License` tag.
+
+For the full license texts, see:
+- `GPL-COPYING` -- GNU General Public License, version 2
+- `MIT-COPYING` -- MIT License
+
+## SPDX
+
+The combined SPDX license expression for this repository is:
+
+    (GPL-2.0-only OR MIT)
