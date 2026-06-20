@@ -284,6 +284,34 @@ PVRSRV_ERROR SysDebugInfo(PVRSRV_DEVICE_CONFIG *psDevConfig,
 	return PVRSRV_OK;
 }
 
+/*
+ * do_invalid_range — DDK 1.19 common code (dma_support.c, rgxlayer_impl.c)
+ * calls this after standard cache maintenance for an extra cache flush.
+ *
+ * The sf_7110 (RISC-V SiFive) implementation allocates a 2 MB zero page and
+ * flushes it through the SiFive L2 cache controller — a workaround for the
+ * SiFive non-coherent L2 that the Linux DMA API does not fully handle.
+ * The start/len parameters are ignored by that implementation (always 0x0,
+ * 0x200000).
+ *
+ * On ARM64 Cortex-A53 (A133), the standard Linux DMA API and the DDK's own
+ * OSCPUCache*RangeKM / OSCPUOperation cache-op paths already call the correct
+ * ARM64 cache maintenance instructions (__flush_dcache_area / __dma_flush_area).
+ * There is no separate L2 cache controller requiring a manual flush — the A53's
+ * unified cache hierarchy is maintained coherently by the kernel.
+ *
+ * The vendor pvrsrvkm.ko (DDK 1.11) does not contain this symbol at all —
+ * the DDK 1.11 dma_support.c did not call it.  A no-op is therefore the
+ * correct ARM64 implementation: any cache maintenance that matters has already
+ * been done by the callers before reaching this point.
+ */
+void do_invalid_range(unsigned long start, unsigned long len)
+{
+	/* No-op on ARM64: standard cache maintenance is sufficient. */
+	(void)start;
+	(void)len;
+}
+
 /******************************************************************************
  End of file (sysconfig.c)
 ******************************************************************************/

@@ -117,7 +117,12 @@
 #define PVRSRV_ENABLE_PROCESS_STATS
 #define SUPPORT_USC_BREAKPOINT
 //#define SUPPORT_TBI_INTERFACE
-#define SUPPORT_AGP
+/* SUPPORT_AGP removed: GE8300 (BVNC 22.102.54.38) is a single geometry core;
+ * AGP (Advanced Geometry Pipeline) enables RGX_NUM_GEOM_CORES=2, doubling
+ * RGXFWIF_STATIC_RENDERCONTEXT_STATE and mismatching the firmware's struct
+ * layout (vendor FWRENDERCONTEXT=544 bytes, ours was 728 with AGP).
+ * Confirmed via alignment check array extraction from vendor pvrsrvkm.ko. */
+/* #define SUPPORT_AGP */
 #define RGXFW_SAFETY_WATCHDOG_PERIOD_IN_US 1000000
 #define PVR_ANNOTATION_MAX_LEN 96
 #define PVRSRV_DEVICE_INIT_MODE PVRSRV_LINUX_DEV_INIT_ON_PROBE
@@ -138,6 +143,17 @@
 #define PDUMP_SCRIPT_BLOCK_STREAM_SIZE 0x800000
 #define PDUMP_SPLIT_64BIT_REGISTER_ACCESS
 #define SUPPORT_NATIVE_FENCE_SYNC
+/* PVRSRV_STALLED_CCB_ACTION: MUST remain defined.
+ * This adds 544 bytes of SLR (Stalled Last Resort) logging fields to
+ * RGXFWIF_OSDATA BEFORE sPowerSync. The vendor FW binary (rgx.fw.22.102.54.38)
+ * was compiled WITH this define: FW disassembly shows sPowerSync read at
+ * OSDATA offset 568, matching SLR-present + THREAD_NUM=1 layout.
+ * Without this define, sPowerSync shifts to offset 20 in the KM's view,
+ * but the FW still writes to offset 568 — the KM polls a location the FW
+ * never writes, causing RGXPollForGPCommandCompletion timeout.
+ * RGXFWIF_OSDATA is NOT covered by the alignment check array, so this
+ * mismatch is undetectable at runtime. Verified via mipsel objdump of
+ * FW FORCED_IDLE handler: `lw v1, 568(a2)` at c0000f7c. */
 #define PVRSRV_STALLED_CCB_ACTION
 #define UPDATE_FENCE_CHECKPOINT_COUNT 1
 #define PVR_DRM_NAME "pvr"

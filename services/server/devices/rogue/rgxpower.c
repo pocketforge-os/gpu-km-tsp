@@ -77,7 +77,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 static PVRSRV_ERROR RGXFWNotifyHostTimeout(PVRSRV_RGXDEV_INFO *psDevInfo)
 {
-	RGXFWIF_KCCB_CMD sCmd;
+	RGXFWIF_KCCB_CMD sCmd = {0};
 	PVRSRV_ERROR eError;
 	IMG_UINT32 ui32CmdKCCBSlot;
 
@@ -181,7 +181,7 @@ PVRSRV_ERROR RGXPrePowerState(IMG_HANDLE				hDevHandle,
 	    (eNewPowerState != PVRSRV_DEV_POWER_STATE_ON))
 	{
 		PVRSRV_RGXDEV_INFO    *psDevInfo = psDeviceNode->pvDevice;
-		RGXFWIF_KCCB_CMD      sPowCmd;
+		RGXFWIF_KCCB_CMD      sPowCmd = {0};
 		IMG_UINT32            ui32CmdKCCBSlot;
 
 		const RGXFWIF_SYSDATA *psFwSysData = psDevInfo->psRGXFWIfFwSysData;
@@ -557,8 +557,8 @@ PVRSRV_ERROR RGXVzPostPowerState(IMG_HANDLE				hDevHandle,
 			 * The default RGXFWHealthCheckCmd() prefaces each HealthCheck command with
 			 * a pre-kick cache command which can interfere with the FW-KM init handshake. */
 			{
-				RGXFWIF_KCCB_CMD sCmpKCCBCmd;
-				sCmpKCCBCmd.eCmdType = RGXFWIF_KCCB_CMD_HEALTH_CHECK;
+			RGXFWIF_KCCB_CMD sCmpKCCBCmd = {0};
+			sCmpKCCBCmd.eCmdType = RGXFWIF_KCCB_CMD_HEALTH_CHECK;
 
 				eError = RGXSendCommandAndGetKCCBSlot(psDevInfo, &sCmpKCCBCmd, PDUMP_FLAGS_CONTINUOUS, NULL);
 				PVR_LOG_RETURN_IF_ERROR(eError, "RGXSendCommandAndGetKCCBSlot()");
@@ -1178,7 +1178,7 @@ PVRSRV_ERROR RGXPostClockSpeedChange(IMG_HANDLE				hDevHandle,
 	if ((eCurrentPowerState != PVRSRV_DEV_POWER_STATE_OFF) &&
 	    (psFwSysData->ePowState != RGXFWIF_POW_OFF))
 	{
-		RGXFWIF_KCCB_CMD sCOREClkSpeedChangeCmd;
+		RGXFWIF_KCCB_CMD sCOREClkSpeedChangeCmd = {0};
 		IMG_UINT32 ui32CmdKCCBSlot;
 
 		RGXTimeCorrBegin(psDeviceNode, RGXTIMECORR_EVENT_DVFS);
@@ -1470,7 +1470,7 @@ PVRSRV_ERROR RGXForcedIdleRequest(IMG_HANDLE hDevHandle, IMG_BOOL bDeviceOffPerm
 {
 	PVRSRV_DEVICE_NODE    *psDeviceNode = hDevHandle;
 	PVRSRV_RGXDEV_INFO    *psDevInfo = psDeviceNode->pvDevice;
-	RGXFWIF_KCCB_CMD      sPowCmd;
+	RGXFWIF_KCCB_CMD      sPowCmd = {0};
 	PVRSRV_ERROR          eError;
 	IMG_UINT32            ui32RetryCount = 0;
 	IMG_UINT32            ui32CmdKCCBSlot;
@@ -1575,7 +1575,7 @@ PVRSRV_ERROR RGXCancelForcedIdleRequest(IMG_HANDLE hDevHandle)
 {
 	PVRSRV_DEVICE_NODE	*psDeviceNode = hDevHandle;
 	PVRSRV_RGXDEV_INFO	*psDevInfo = psDeviceNode->pvDevice;
-	RGXFWIF_KCCB_CMD	sPowCmd;
+	RGXFWIF_KCCB_CMD	sPowCmd = {0};
 	PVRSRV_ERROR		eError = PVRSRV_OK;
 	IMG_UINT32			ui32CmdKCCBSlot;
 	PVRSRV_VZ_RET_IF_MODE(GUEST, PVRSRV_OK);

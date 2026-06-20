@@ -54,7 +54,22 @@ PVR_BUILD_OVERRIDE := 1
 # runtime behavior. They are INDEPENDENT of the build-options bitmask override.
 #
 # SUPPORT_DISPLAY_CLASS=1     : required for dc_sunxi.ko DC API symbol exports
-# SUPPORT_WORKLOAD_ESTIMATION=1 : vendor has this enabled (bit 8 in their word)
+#
+# SUPPORT_WORKLOAD_ESTIMATION: REMOVED 2026-06-15.
+#   Originally enabled because bit 8 in the vendor build-options word was set.
+#   However, the vendor FW binary (rgx.fw.22.102.54.38) was compiled WITHOUT
+#   SUPPORT_WORKLOAD_ESTIMATION — the FW build-options word is 0x80000010
+#   (only OPTIONS_RGX_EN + PERCONTEXT_FREELIST), not 0x0060d13d (which is
+#   the vendor KM's word, distinct from the FW's). Enabling this in our KM
+#   causes three ABI mismatches with the vendor FW:
+#     1. KICK_DATA struct is 32 bytes (vs vendor FW's 28) — wrong KCCB
+#        copy size for GPU kick commands
+#     2. RGXFWIF_INICFG_WORKEST flag (bit 25) set in ui32ConfigFlags written
+#        to RGXFWIF_FWSYSDATA — FW sees an unexpected config bit
+#     3. WorkEst CCB allocated and its address written to SYSINIT — FW
+#        ignores it (no workload estimation code compiled in)
+#   GPU DVFS on A133 is handled by sunxi_platform.c via devfreq, not by
+#   PVR's workload estimation. Removing this define costs nothing functional.
 #
 # NOTE: SUPPORT_RGX=1 and RELEASE are already defined in
 # config_kernel_sunxi_a133.h (included via -include). Do NOT duplicate
@@ -65,6 +80,16 @@ PVR_BUILD_OVERRIDE := 1
 #   DEBUG               (debug build -- conflicts with RELEASE)
 #   PDUMP               (parameter dump -- not in vendor build)
 #   SUPPORT_PDVFS       (proactive DVFS -- bit 9 = 0 in vendor)
+#   SUPPORT_WORKLOAD_ESTIMATION (vendor FW compiled without it -- see above)
+# --------------------------------------------------------------------------
+# Make-level feature flags for Kbuild.mk conditionals
+# --------------------------------------------------------------------------
+# The Kbuild.mk files use ifeq ($(SUPPORT_*),1) to gate source file
+# inclusion. These MUST be set as Make variables (not just -D CFLAGS),
+# otherwise the conditional object files won't be compiled and MODPOST
+# will report undefined symbols.
+SUPPORT_DISPLAY_CLASS := 1
+
 PVR_KM_CFLAGS := \
 	-DSUPPORT_DISPLAY_CLASS=1 \
-	-DSUPPORT_WORKLOAD_ESTIMATION=1
+	-DTRACK_FW_BOOT
