@@ -278,7 +278,15 @@ static inline bool seq_has_overflowed(struct seq_file *m)
 #endif /* (LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0)) */
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0))
+/* This TrimUI/sonic_pad 4.9.191 BSP backports refcount_read() as a real
+ * function (include/linux/refcount.h), so the generic <4.11 macro shim
+ * collides with the kernel's own definition (the macro mangles the function
+ * declaration). Only shim kernels that genuinely lack it (pre-4.9 mainline).
+ * Exposed when SUPPORT_FALLBACK_FENCE_SYNC replaced NATIVE/BUFFER_SYNC, which
+ * had transitively pulled in <linux/refcount.h> early and masked the clash. */
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0))
 #define refcount_read(r) atomic_read(r)
+#endif
 #define drm_mm_insert_node(mm, node, size) drm_mm_insert_node(mm, node, size, 0, DRM_MM_SEARCH_DEFAULT)
 
 #define drm_helper_mode_fill_fb_struct(dev, fb, mode_cmd) drm_helper_mode_fill_fb_struct(fb, mode_cmd)
