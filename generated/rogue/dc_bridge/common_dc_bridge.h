@@ -96,8 +96,8 @@ typedef struct PVRSRV_BRIDGE_IN_DCDEVICESQUERYCOUNT_TAG
 /* Bridge out structure for DCDevicesQueryCount */
 typedef struct PVRSRV_BRIDGE_OUT_DCDEVICESQUERYCOUNT_TAG
 {
-	IMG_UINT32 ui32DeviceCount;
 	PVRSRV_ERROR eError;
+	IMG_UINT32 ui32DeviceCount;
 } __attribute__ ((packed)) PVRSRV_BRIDGE_OUT_DCDEVICESQUERYCOUNT;
 
 /*******************************************
@@ -115,9 +115,9 @@ typedef struct PVRSRV_BRIDGE_IN_DCDEVICESENUMERATE_TAG
 /* Bridge out structure for DCDevicesEnumerate */
 typedef struct PVRSRV_BRIDGE_OUT_DCDEVICESENUMERATE_TAG
 {
-	IMG_UINT32 ui32DeviceCount;
 	IMG_UINT32 *pui32DeviceIndex;
 	PVRSRV_ERROR eError;
+	IMG_UINT32 ui32DeviceCount;
 } __attribute__ ((packed)) PVRSRV_BRIDGE_OUT_DCDEVICESENUMERATE;
 
 /*******************************************
@@ -183,8 +183,8 @@ typedef struct PVRSRV_BRIDGE_IN_DCPANELQUERYCOUNT_TAG
 /* Bridge out structure for DCPanelQueryCount */
 typedef struct PVRSRV_BRIDGE_OUT_DCPANELQUERYCOUNT_TAG
 {
-	IMG_UINT32 ui32NumPanels;
 	PVRSRV_ERROR eError;
+	IMG_UINT32 ui32NumPanels;
 } __attribute__ ((packed)) PVRSRV_BRIDGE_OUT_DCPANELQUERYCOUNT;
 
 /*******************************************
@@ -203,9 +203,9 @@ typedef struct PVRSRV_BRIDGE_IN_DCPANELQUERY_TAG
 /* Bridge out structure for DCPanelQuery */
 typedef struct PVRSRV_BRIDGE_OUT_DCPANELQUERY_TAG
 {
-	IMG_UINT32 ui32NumPanels;
 	PVRSRV_PANEL_INFO *psPanelInfo;
 	PVRSRV_ERROR eError;
+	IMG_UINT32 ui32NumPanels;
 } __attribute__ ((packed)) PVRSRV_BRIDGE_OUT_DCPANELQUERY;
 
 /*******************************************
@@ -314,9 +314,9 @@ typedef struct PVRSRV_BRIDGE_IN_DCSYSTEMBUFFERACQUIRE_TAG
 /* Bridge out structure for DCSystemBufferAcquire */
 typedef struct PVRSRV_BRIDGE_OUT_DCSYSTEMBUFFERACQUIRE_TAG
 {
-	IMG_UINT32 ui32Stride;
 	IMG_HANDLE hBuffer;
 	PVRSRV_ERROR eError;
+	IMG_UINT32 ui32Stride;
 } __attribute__ ((packed)) PVRSRV_BRIDGE_OUT_DCSYSTEMBUFFERACQUIRE;
 
 /*******************************************
@@ -429,9 +429,9 @@ typedef struct PVRSRV_BRIDGE_IN_DCBUFFERALLOC_TAG
 /* Bridge out structure for DCBufferAlloc */
 typedef struct PVRSRV_BRIDGE_OUT_DCBUFFERALLOC_TAG
 {
-	IMG_UINT32 ui32Stride;
 	IMG_HANDLE hBuffer;
 	PVRSRV_ERROR eError;
+	IMG_UINT32 ui32Stride;
 } __attribute__ ((packed)) PVRSRV_BRIDGE_OUT_DCBUFFERALLOC;
 
 /*******************************************
