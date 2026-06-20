@@ -107,9 +107,9 @@ typedef struct PVRSRV_BRIDGE_OUT_DCDEVICESQUERYCOUNT_TAG
 /* Bridge in structure for DCDevicesEnumerate */
 typedef struct PVRSRV_BRIDGE_IN_DCDEVICESENUMERATE_TAG
 {
-	IMG_UINT32 ui32DeviceArraySize;
 	/* Output pointer pui32DeviceIndex is also an implied input */
 	IMG_UINT32 *pui32DeviceIndex;
+	IMG_UINT32 ui32DeviceArraySize;
 } __attribute__ ((packed)) PVRSRV_BRIDGE_IN_DCDEVICESENUMERATE;
 
 /* Bridge out structure for DCDevicesEnumerate */
@@ -195,9 +195,9 @@ typedef struct PVRSRV_BRIDGE_OUT_DCPANELQUERYCOUNT_TAG
 typedef struct PVRSRV_BRIDGE_IN_DCPANELQUERY_TAG
 {
 	IMG_HANDLE hDevice;
-	IMG_UINT32 ui32PanelsArraySize;
 	/* Output pointer psPanelInfo is also an implied input */
 	PVRSRV_PANEL_INFO *psPanelInfo;
+	IMG_UINT32 ui32PanelsArraySize;
 } __attribute__ ((packed)) PVRSRV_BRIDGE_IN_DCPANELQUERY;
 
 /* Bridge out structure for DCPanelQuery */
@@ -216,10 +216,10 @@ typedef struct PVRSRV_BRIDGE_OUT_DCPANELQUERY_TAG
 typedef struct PVRSRV_BRIDGE_IN_DCFORMATQUERY_TAG
 {
 	IMG_HANDLE hDevice;
-	IMG_UINT32 ui32NumFormats;
 	PVRSRV_SURFACE_FORMAT *psFormat;
 	/* Output pointer pui32Supported is also an implied input */
 	IMG_UINT32 *pui32Supported;
+	IMG_UINT32 ui32NumFormats;
 } __attribute__ ((packed)) PVRSRV_BRIDGE_IN_DCFORMATQUERY;
 
 /* Bridge out structure for DCFormatQuery */
@@ -237,10 +237,10 @@ typedef struct PVRSRV_BRIDGE_OUT_DCFORMATQUERY_TAG
 typedef struct PVRSRV_BRIDGE_IN_DCDIMQUERY_TAG
 {
 	IMG_HANDLE hDevice;
-	IMG_UINT32 ui32NumDims;
 	PVRSRV_SURFACE_DIMS *psDim;
 	/* Output pointer pui32Supported is also an implied input */
 	IMG_UINT32 *pui32Supported;
+	IMG_UINT32 ui32NumDims;
 } __attribute__ ((packed)) PVRSRV_BRIDGE_IN_DCDIMQUERY;
 
 /* Bridge out structure for DCDimQuery */
@@ -360,9 +360,9 @@ typedef struct PVRSRV_BRIDGE_OUT_DCDISPLAYCONTEXTCREATE_TAG
 typedef struct PVRSRV_BRIDGE_IN_DCDISPLAYCONTEXTCONFIGURECHECK_TAG
 {
 	IMG_HANDLE hDisplayContext;
-	IMG_UINT32 ui32PipeCount;
 	PVRSRV_SURFACE_CONFIG_INFO *psSurfInfo;
 	IMG_HANDLE *phBuffers;
+	IMG_UINT32 ui32PipeCount;
 } __attribute__ ((packed)) PVRSRV_BRIDGE_IN_DCDISPLAYCONTEXTCONFIGURECHECK;
 
 /* Bridge out structure for DCDisplayContextConfigureCheck */
@@ -379,13 +379,13 @@ typedef struct PVRSRV_BRIDGE_OUT_DCDISPLAYCONTEXTCONFIGURECHECK_TAG
 typedef struct PVRSRV_BRIDGE_IN_DCDISPLAYCONTEXTCONFIGURE_TAG
 {
 	IMG_HANDLE hDisplayContext;
-	IMG_UINT32 ui32ClientCacheOpSeqNum;
-	IMG_UINT32 ui32PipeCount;
 	PVRSRV_SURFACE_CONFIG_INFO *psSurfInfo;
 	IMG_HANDLE *phBuffers;
-	IMG_UINT32 ui32SyncCount;
 	IMG_HANDLE *phSync;
 	IMG_BOOL *pbUpdate;
+	IMG_UINT32 ui32ClientCacheOpSeqNum;
+	IMG_UINT32 ui32PipeCount;
+	IMG_UINT32 ui32SyncCount;
 	IMG_UINT32 ui32DisplayPeriod;
 	IMG_UINT32 ui32MaxDepth;
 	PVRSRV_FENCE hAcquireFence;
@@ -395,8 +395,8 @@ typedef struct PVRSRV_BRIDGE_IN_DCDISPLAYCONTEXTCONFIGURE_TAG
 /* Bridge out structure for DCDisplayContextConfigure */
 typedef struct PVRSRV_BRIDGE_OUT_DCDISPLAYCONTEXTCONFIGURE_TAG
 {
-	PVRSRV_FENCE hReleaseFence;
 	PVRSRV_ERROR eError;
+	PVRSRV_FENCE hReleaseFence;
 } __attribute__ ((packed)) PVRSRV_BRIDGE_OUT_DCDISPLAYCONTEXTCONFIGURE;
 
 /*******************************************
