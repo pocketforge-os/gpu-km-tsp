@@ -323,48 +323,48 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 	}
 
 /* --------------------------------------------------------------------------
- * PocketForge: Override build-options constants for dual-ABI compatibility.
+ * PocketForge: Override build-options constants for KM<->UM<->FW ABI match.
  *
- * Problem: Three ABI boundaries share one RGX_BUILD_OPTIONS_KM constant:
- *   1. KM <-> UM (srvcore.c): vendor UM blobs present 0x0060d13d
- *   2. KM <-> FW (rgxinit.c): vendor firmware presents 0x80000010
- *   3. FW alignment checks:  struct layouts must match firmware's expectations
+ * Our source-built KM (DC-DeepComputing DDK 1.19) runs against the vendor's
+ * CLOSED userspace blobs (NULL_WSEGL) and vendor firmware. Three checks compare
+ * a build-options word:
+ *   1. KM <-> UM (srvcore.c PVRSRVConnectKM): the vendor UM's build-options
+ *      word is 0x80000010, which masks by RGX_BUILD_OPTIONS_MASK_KM down to 0x10
+ *      (bit31 is above the KM mask range). IMPORTANT: 0x0060d13d is NOT the UM
+ *      build-options word — disassembly of libsrv_um.so shows it is the
+ *      ui32ClientDDKBuild field (offset +4 of the connect IN-struct), which
+ *      feeds only a warning-only DDK-build check, not the options comparison.
+ *   2. KM <-> FW (rgxinit.c): firmware presents 0x80000010 (-> 0x10 after MASK_FW).
+ *   3. FW alignment checks: struct layouts must match the firmware. These are
+ *      driven by feature #ifdefs / sizeof / offsetof, NOT by these scalar
+ *      constants (25/25 alignment match after SUPPORT_AGP removal).
  *
- * The Allwinner-internal DDK 1.19 rgx_options.h has DIFFERENT bit-to-feature
- * mappings than DC-DeepComputing's source. Bits 0,3,5,12,14,15,21,22 in the
- * vendor word 0x0060d13d have Allwinner-internal meanings that do NOT map to
- * NO_HARDWARE, SECURE_ALLOC, etc. in our source tree.
+ * All three boundaries therefore want the KM to present 0x10 (RGX_EN) after
+ * masking. Set RGX_BUILD_OPTIONS_KM = 0x10 directly: the KM<->UM check then
+ * passes by equality (server 0x10 == masked client 0x10) and KM<->FW stays
+ * 0x10 == 0x10.
  *
- * Solution: Set RGX_BUILD_OPTIONS_KM to the vendor UM word (0x0060d13d) for
- * UM compatibility. Override FW_OPTIONS_STRICT to exclude all Allwinner-
- * internal bits, so the KM<->FW check ignores bits that are semantically
- * meaningless in our build. The firmware's actual options (0x80000010 after
- * masking = 0x10 = RGX_EN) are a subset of ours; the strict-mask exclusion
- * makes the check pass.
+ * History: an earlier override (tsp-cv7.4.2) set this to 0x0060d13d on the
+ * mistaken premise that the UM presents 0x0060d13d. That made the KM advertise
+ * extra bits 0x60d029, and PVRSRVConnectKM rejected the vendor UM with
+ * "extra options present in KM driver: (0x60d029)". Corrected 2026-06-20
+ * (tsp-cv7.4.3) after disassembling libsrv_um.so to read the real connect
+ * IN-struct field order {BuildOptions+0=0x80000010, DDKBuild+4=0x0060d13d, ...}.
  *
- * Evidence: firmware boot log shows "FW info: 1.19 @ 6345021 (release)
- * build options: 0x80000010" and "RGX FW State: OK" — firmware initializes
- * correctly with our struct layouts (alignment check 25/25 match after
- * SUPPORT_AGP removal). Only the build-options bitmask comparison fails.
- *
- * Source: logs/gpu-km-abi-mismatch-research.md, logs/pvrsrvkm-buildopts-vendor.txt
- * Bead:   tsp-cv7.4.2
+ * Source: logs/gpu-km-abi-mismatch-research.md ; Bead: tsp-cv7.4.3
  * ----------------------------------------------------------------------- */
 #undef  RGX_BUILD_OPTIONS_KM
-#define RGX_BUILD_OPTIONS_KM      0x0060d13dUL
+#define RGX_BUILD_OPTIONS_KM      0x00000010UL
 
 #undef  RGX_BUILD_OPTIONS_MASK_KM
-#define RGX_BUILD_OPTIONS_MASK_KM 0x0060fffbUL
+#define RGX_BUILD_OPTIONS_MASK_KM 0x0000fffbUL
 
 #undef  RGX_BUILD_OPTIONS
 #define RGX_BUILD_OPTIONS         (RGX_BUILD_OPTIONS_KM)
 
-/* Override FW_OPTIONS_STRICT to exclude Allwinner-internal bits (0,3,5,12,
- * 14,15,21,22) that are present in our KM options word (to match vendor UM)
- * but absent in the firmware's options word (0x80000010). These bits have
- * different semantic meanings in Allwinner's internal DDK variant vs the
- * DC-DeepComputing source we build from, so the KM<->FW strict check must
- * ignore them. Only bit 4 (RGX_EN) is common and must match — it does. */
+/* FW_OPTIONS_STRICT: only RGX_EN (bit 4 / 0x10) is strictly required for the
+ * KM<->FW build-options check. With RGX_BUILD_OPTIONS_KM = 0x10, the KM and FW
+ * words coincide (0x10 == 0x10), so this is consistent and the check passes. */
 #undef  FW_OPTIONS_STRICT
 #define FW_OPTIONS_STRICT         0x00000010UL  /* only RGX_EN is strictly required */
 
