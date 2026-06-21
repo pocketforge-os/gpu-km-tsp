@@ -973,7 +973,15 @@ static PVRSRV_ERROR _DCCreatePMR(PVRSRV_DEVICE_NODE *psDevNode,
 	                      1,
 	                      &uiMappingTable,
 	                      uiLog2PageSize,
-	                      PVRSRV_MEMALLOCFLAG_UNCACHED_WC,
+	                      /* tsp-cv7.4.3: vendor A133 pvrsrvkm.ko _DCCreatePMR passes
+	                       * uiFlags=0x20 (CPU_WRITEABLE | UNCACHED_WC) to PMRCreatePMR
+	                       * (disasm-verified: movz x6,#0x20 at the bl PMRCreatePMR).
+	                       * The DeepComputing sf_7110 port we forked omits CPU_WRITEABLE
+	                       * (UNCACHED_WC alone = 0x0), so the DC buffer PMR is non-CPU-
+	                       * writeable and the WSEGL's PROT_WRITE mmap of it is rejected by
+	                       * PMRMMapPMR -> PVRSRV_ERROR_PMR_NOT_PERMITTED -> eglCreate-
+	                       * WindowSurface EGL_BAD_ALLOC. Match the vendor exactly. */
+	                      PVRSRV_MEMALLOCFLAG_CPU_WRITEABLE | PVRSRV_MEMALLOCFLAG_UNCACHED_WC,
 	                      pszAnnotation,
 	                      &sDCPMRFuncTab,
 	                      psPMRPriv,
