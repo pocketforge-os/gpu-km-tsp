@@ -1570,8 +1570,7 @@ PVRSRVBridgeDCDisplayContextConfigure(IMG_UINT32 ui32DispatchTableEntry,
 
 	psDCDisplayContextConfigureOUT->eError =
 	    DCDisplayContextConfigure(psDisplayContextInt,
-				      psDCDisplayContextConfigureIN->
-				      ui32ClientCacheOpSeqNum,
+				      0 /* tsp-cv7.4.3: ui32ClientCacheOpSeqNum dropped in WithFence ABI */,
 				      psDCDisplayContextConfigureIN->
 				      ui32PipeCount, psSurfInfoInt,
 				      psBuffersInt,

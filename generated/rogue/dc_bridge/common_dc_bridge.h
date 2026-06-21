@@ -79,9 +79,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  * Free=19, Unimport=20, Pin=21, Unpin=22, BufferAcquire=23, BufferRelease=24.
  * Before this fix the UM's BufferRelease(24)/Free(19) dispatched to the wrong KM
  * handlers -> PMR_INVALID_CHUNK/NO_KERNEL_MAPPING -> eglCreateWindowSurface
- * EGL_BAD_ALLOC. Legacy DCDisplayContextConfigure is parked at 25 (the now-free
- * top slot); it is NOT called on the surface-creation path. The present/flip path
- * (UM ContextConfigureWithFence@25) is a separate follow-up. */
+ * EGL_BAD_ALLOC. Func 25 (DCDISPLAYCONTEXTCONFIGURE) IS where the UM's
+ * ContextConfigureWithFence lands; its IN struct + handler have been converted to
+ * the 44B WithFence ABI (see the IN struct comment + server_dc_bridge.c) so the
+ * present/flip path dispatches correctly. */
 #define PVRSRV_BRIDGE_DC_DCDISPLAYCONTEXTDESTROY			PVRSRV_BRIDGE_DC_CMD_FIRST+16
 #define PVRSRV_BRIDGE_DC_DCBUFFERALLOC			PVRSRV_BRIDGE_DC_CMD_FIRST+17
 #define PVRSRV_BRIDGE_DC_DCBUFFERIMPORT			PVRSRV_BRIDGE_DC_CMD_FIRST+18
@@ -386,21 +387,30 @@ typedef struct PVRSRV_BRIDGE_OUT_DCDISPLAYCONTEXTCONFIGURECHECK_TAG
             DCDisplayContextConfigure
  *******************************************/
 
-/* Bridge in structure for DCDisplayContextConfigure */
+/* Bridge in structure for DCDisplayContextConfigure.
+ * tsp-cv7.4.3: the vendor UM at func 25 is PVRSRVDCContextConfigureWithFence
+ * ("DCDisplayContextConfigure2"), NOT the legacy DCDisplayContextConfigure. Its
+ * IN struct is 44 bytes / 8 fields, NOT the legacy 68B/12. Layout disasm-verified
+ * against /tmp/umblobs/libsrv_um.so (PVRSRVDCContextConfigureWithFence @0x103e8,
+ * IN size=0x2c) AND the WSEGL caller libpvrNULL_WSEGL.so
+ * (WSEGL_SwapDrawableWithDamage @0x2918): the present path loads
+ *   @24=hReleaseFenceTimeline (caller arg w7),  @28=hAcquireFence (-1 default),
+ *   @32=ui32DisplayPeriod (ctx+296 swap interval, w5),
+ *   @36=ui32MaxDepth (ctx+280 swapchain depth 2/3, w6),  @40=ui32PipeCount (=1, w2).
+ * The legacy phSync/pbUpdate (8B ptrs), ui32ClientCacheOpSeqNum and ui32SyncCount
+ * are DROPPED in the WithFence ABI (the handler never used phSync/pbUpdate/SyncCount;
+ * ClientCacheOpSeqNum now passed as 0). Keeping the old 68B layout made the UM's
+ * pipeCount@40 read at our @44 (past the 44B sent) -> garbage pipeCount -> present fails. */
 typedef struct PVRSRV_BRIDGE_IN_DCDISPLAYCONTEXTCONFIGURE_TAG
 {
-	IMG_HANDLE hDisplayContext;
-	PVRSRV_SURFACE_CONFIG_INFO *psSurfInfo;
-	IMG_HANDLE *phBuffers;
-	IMG_HANDLE *phSync;
-	IMG_BOOL *pbUpdate;
-	IMG_UINT32 ui32ClientCacheOpSeqNum;
-	IMG_UINT32 ui32PipeCount;
-	IMG_UINT32 ui32SyncCount;
-	IMG_UINT32 ui32DisplayPeriod;
-	IMG_UINT32 ui32MaxDepth;
-	PVRSRV_FENCE hAcquireFence;
-	PVRSRV_TIMELINE hReleaseFenceTimeline;
+	IMG_HANDLE hDisplayContext;             /* @0  (8) */
+	PVRSRV_SURFACE_CONFIG_INFO *psSurfInfo; /* @8  (8) */
+	IMG_HANDLE *phBuffers;                  /* @16 (8) */
+	PVRSRV_TIMELINE hReleaseFenceTimeline;  /* @24 (4) */
+	PVRSRV_FENCE hAcquireFence;             /* @28 (4) */
+	IMG_UINT32 ui32DisplayPeriod;           /* @32 (4) */
+	IMG_UINT32 ui32MaxDepth;                /* @36 (4) */
+	IMG_UINT32 ui32PipeCount;               /* @40 (4) */
 } __attribute__ ((packed)) PVRSRV_BRIDGE_IN_DCDISPLAYCONTEXTCONFIGURE;
 
 /* Bridge out structure for DCDisplayContextConfigure */
