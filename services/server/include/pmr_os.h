@@ -46,7 +46,21 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "pmr_impl.h"
 
-#define SYSPORT_MEM_OFFSET   0x400000000    /*this may used in any other place */
+/* SYSPORT_MEM_OFFSET: on the DeepComputing sf_7110 (RISC-V SiFive) platform the
+ * GPU reaches DRAM through a "system port" aperture, so uncached PMR mappings are
+ * aliased +16GB (0x4_0000_0000) to hit the uncached system-port view of the same
+ * RAM (see pmr_os.c _OSMMapPMR: riscv_cached ? addr : addr+SYSPORT_MEM_OFFSET).
+ * On ARM64 / sunxi_a133 there is NO such aperture — the GPU sees CPU physical
+ * addresses 1:1 (vendor pvrsrvkm.ko confirmed: UMA Cpu<->Dev translation is a pure
+ * copy, no offset). Applying the RISC-V offset here put every UNCACHED userspace
+ * PMR mapping 16GB past the top of DRAM -> external-abort SError on first GPU/
+ * firmware-context buffer write (tsp-cv7.4.3). Gate the offset to RISC-V builds so
+ * ARM64 always maps 1:1; the sf_7110 build is unaffected. */
+#if defined(__riscv)
+#define SYSPORT_MEM_OFFSET   0x400000000
+#else
+#define SYSPORT_MEM_OFFSET   0x0
+#endif
 
 /*************************************************************************/ /*!
 @Function       OSMMapPMRGeneric
