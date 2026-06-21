@@ -49,16 +49,20 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #define PVRVERSION_FAMILY           "rogueddk"
 #define PVRVERSION_BRANCHNAME       "1.19"
-/* PocketForge: Override build revision to match vendor UM blobs.
- * The vendor pvrsrvkm.ko reports PVRVERSION_BUILD = 1, not the
- * DC-DeepComputing default of 6345021. The KM/UM version check at
- * srvcore.c compares the full packed DDK version AND build revision;
- * both must match. See logs/pvrsrvkm-buildopts-vendor.txt. */
-#define PVRVERSION_BUILD             1
+/* PocketForge: DDK build revision. Must match the FIRMWARE (rgx.fw.22.102.54.38
+ * reports 1.19@6345021) and the source default. An earlier override to 1 was
+ * based on two false premises, both disproven 2026-06-20: (1) the vendor
+ * pvrsrvkm.ko actually reports "Rogue_DDK_Linux rogueddk 1.19@6345021" (strings),
+ * NOT 1; (2) the UM<->KM build-revision check in srvcore.c is non-fatal unless
+ * PVRSRV_STRICT_COMPAT_CHECK is defined (it isn't), so it never required a match.
+ * The build=1 override only produced the boot WARN "Different driver DDK build
+ * version (1) / Firmware DDK build version (6345021)". Restore to 6345021 so KM,
+ * firmware, and source agree. (tsp-cv7.4.3) */
+#define PVRVERSION_BUILD             6345021
 #define PVRVERSION_BSCONTROL        "Rogue_DDK_Linux_WS"
 
-#define PVRVERSION_STRING           "Rogue_DDK_Linux_WS rogueddk 1.19@1"
-#define PVRVERSION_STRING_SHORT     "1.19@1"
+#define PVRVERSION_STRING           "Rogue_DDK_Linux_WS rogueddk 1.19@6345021"
+#define PVRVERSION_STRING_SHORT     "1.19@6345021"
 
 #define COPYRIGHT_TXT               "Copyright (c) Imagination Technologies Ltd. All Rights Reserved."
 
