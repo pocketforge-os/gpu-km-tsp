@@ -71,16 +71,27 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #define PVRSRV_BRIDGE_DC_DCSYSTEMBUFFERRELEASE			PVRSRV_BRIDGE_DC_CMD_FIRST+13
 #define PVRSRV_BRIDGE_DC_DCDISPLAYCONTEXTCREATE			PVRSRV_BRIDGE_DC_CMD_FIRST+14
 #define PVRSRV_BRIDGE_DC_DCDISPLAYCONTEXTCONFIGURECHECK			PVRSRV_BRIDGE_DC_CMD_FIRST+15
-#define PVRSRV_BRIDGE_DC_DCDISPLAYCONTEXTCONFIGURE			PVRSRV_BRIDGE_DC_CMD_FIRST+16
-#define PVRSRV_BRIDGE_DC_DCDISPLAYCONTEXTDESTROY			PVRSRV_BRIDGE_DC_CMD_FIRST+17
-#define PVRSRV_BRIDGE_DC_DCBUFFERALLOC			PVRSRV_BRIDGE_DC_CMD_FIRST+18
-#define PVRSRV_BRIDGE_DC_DCBUFFERIMPORT			PVRSRV_BRIDGE_DC_CMD_FIRST+19
-#define PVRSRV_BRIDGE_DC_DCBUFFERFREE			PVRSRV_BRIDGE_DC_CMD_FIRST+20
-#define PVRSRV_BRIDGE_DC_DCBUFFERUNIMPORT			PVRSRV_BRIDGE_DC_CMD_FIRST+21
-#define PVRSRV_BRIDGE_DC_DCBUFFERPIN			PVRSRV_BRIDGE_DC_CMD_FIRST+22
-#define PVRSRV_BRIDGE_DC_DCBUFFERUNPIN			PVRSRV_BRIDGE_DC_CMD_FIRST+23
-#define PVRSRV_BRIDGE_DC_DCBUFFERACQUIRE			PVRSRV_BRIDGE_DC_CMD_FIRST+24
-#define PVRSRV_BRIDGE_DC_DCBUFFERRELEASE			PVRSRV_BRIDGE_DC_CMD_FIRST+25
+/* tsp-cv7.4.3: DC bridge func numbers >=16 realigned to the vendor closed-UM ABI.
+ * The vendor DDK DROPPED legacy DCDisplayContextConfigure and presents via
+ * ContextConfigureWithFence (func 25); every func from 16 up therefore shifts
+ * DOWN by one vs the auto-generated default. Confirmed by disassembling
+ * libsrv_um.so (group 12): DisplayContextDestroy=16, BufferAlloc=17, Import=18,
+ * Free=19, Unimport=20, Pin=21, Unpin=22, BufferAcquire=23, BufferRelease=24.
+ * Before this fix the UM's BufferRelease(24)/Free(19) dispatched to the wrong KM
+ * handlers -> PMR_INVALID_CHUNK/NO_KERNEL_MAPPING -> eglCreateWindowSurface
+ * EGL_BAD_ALLOC. Legacy DCDisplayContextConfigure is parked at 25 (the now-free
+ * top slot); it is NOT called on the surface-creation path. The present/flip path
+ * (UM ContextConfigureWithFence@25) is a separate follow-up. */
+#define PVRSRV_BRIDGE_DC_DCDISPLAYCONTEXTDESTROY			PVRSRV_BRIDGE_DC_CMD_FIRST+16
+#define PVRSRV_BRIDGE_DC_DCBUFFERALLOC			PVRSRV_BRIDGE_DC_CMD_FIRST+17
+#define PVRSRV_BRIDGE_DC_DCBUFFERIMPORT			PVRSRV_BRIDGE_DC_CMD_FIRST+18
+#define PVRSRV_BRIDGE_DC_DCBUFFERFREE			PVRSRV_BRIDGE_DC_CMD_FIRST+19
+#define PVRSRV_BRIDGE_DC_DCBUFFERUNIMPORT			PVRSRV_BRIDGE_DC_CMD_FIRST+20
+#define PVRSRV_BRIDGE_DC_DCBUFFERPIN			PVRSRV_BRIDGE_DC_CMD_FIRST+21
+#define PVRSRV_BRIDGE_DC_DCBUFFERUNPIN			PVRSRV_BRIDGE_DC_CMD_FIRST+22
+#define PVRSRV_BRIDGE_DC_DCBUFFERACQUIRE			PVRSRV_BRIDGE_DC_CMD_FIRST+23
+#define PVRSRV_BRIDGE_DC_DCBUFFERRELEASE			PVRSRV_BRIDGE_DC_CMD_FIRST+24
+#define PVRSRV_BRIDGE_DC_DCDISPLAYCONTEXTCONFIGURE			PVRSRV_BRIDGE_DC_CMD_FIRST+25
 #define PVRSRV_BRIDGE_DC_CMD_LAST			(PVRSRV_BRIDGE_DC_CMD_FIRST+25)
 
 /*******************************************
@@ -529,11 +540,15 @@ typedef struct PVRSRV_BRIDGE_IN_DCBUFFERACQUIRE_TAG
 	IMG_HANDLE hBuffer;
 } __attribute__ ((packed)) PVRSRV_BRIDGE_IN_DCBUFFERACQUIRE;
 
-/* Bridge out structure for DCBufferAcquire */
+/* Bridge out structure for DCBufferAcquire.
+ * tsp-cv7.4.3: trailing ui32 added so OUT size = 12 to match the vendor UM ABI
+ * (libsrv_um.so DCBufferAcquire OUT_size=12: hExtMem@0, eError@8, 4 trailing
+ * bytes the UM does not read). Mirrors DCBufferAlloc OUT's ui32Stride slot. */
 typedef struct PVRSRV_BRIDGE_OUT_DCBUFFERACQUIRE_TAG
 {
 	IMG_HANDLE hExtMem;
 	PVRSRV_ERROR eError;
+	IMG_UINT32 ui32Stride;
 } __attribute__ ((packed)) PVRSRV_BRIDGE_OUT_DCBUFFERACQUIRE;
 
 /*******************************************
