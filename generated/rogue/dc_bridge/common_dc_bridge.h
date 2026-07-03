@@ -391,12 +391,28 @@ typedef struct PVRSRV_BRIDGE_OUT_DCDISPLAYCONTEXTCONFIGURECHECK_TAG
  * tsp-cv7.4.3: the vendor UM at func 25 is PVRSRVDCContextConfigureWithFence
  * ("DCDisplayContextConfigure2"), NOT the legacy DCDisplayContextConfigure. Its
  * IN struct is 44 bytes / 8 fields, NOT the legacy 68B/12. Layout disasm-verified
- * against /tmp/umblobs/libsrv_um.so (PVRSRVDCContextConfigureWithFence @0x103e8,
- * IN size=0x2c) AND the WSEGL caller libpvrNULL_WSEGL.so
- * (WSEGL_SwapDrawableWithDamage @0x2918): the present path loads
- *   @24=hReleaseFenceTimeline (caller arg w7),  @28=hAcquireFence (-1 default),
+ * against blobs/tsp/22.102.54.38/lib/libsrv_um.so (PVRSRVDCContextConfigureWithFence
+ * @0x103e8, IN size=0x2c) AND the WSEGL caller libpvrNULL_WSEGL.so
+ * (WSEGL_SwapDrawableWithDamage @0x2918).
+ *
+ * tsp-cv7.4.3.1 (2026-07-03): the @24/@28 fence fields were SWAPPED in b60161f,
+ * which made the KM run SyncSWTimelineFenceCreateKM on the ACQUIRE fence handle
+ * every frame -> PVRSRV_ERROR_HANDLE_TYPE_MISMATCH (a FENCE where a TIMELINE was
+ * expected) -> per-frame present aborted -> dc_sunxi fb_pan_display never ran (log
+ * flood; cube stuck scale-squashed). Re-disasm of BOTH the UM packer and the WSEGL
+ * caller, cross-checked against the runtime diag (acquireFence=4/FENCE,
+ * releaseTimeline=14/FENCE), proves the true wire layout:
+ *   @24=hAcquireFence      (UM packer arg7 / caller w7),
+ *   @28=hReleaseFenceTimeline (UM packs *(hDisplayContext+16), the display-context's
+ *        SW timeline from DisplayContextCreate; -1/PVRSRV_NO_TIMELINE when the caller
+ *        passes a NULL piReleaseFence -> the -1 "default" seen at @28 confirms it is
+ *        the TIMELINE slot, not acquire),
  *   @32=ui32DisplayPeriod (ctx+296 swap interval, w5),
  *   @36=ui32MaxDepth (ctx+280 swapchain depth 2/3, w6),  @40=ui32PipeCount (=1, w2).
+ * With the swap corrected both handle lookups type-match (acquire=FENCE,
+ * releaseTimeline=TIMELINE). NULL_WSEGL imports zero timeline-create ops precisely
+ * because the timeline is owned by the display context, not minted per swap.
+ *
  * The legacy phSync/pbUpdate (8B ptrs), ui32ClientCacheOpSeqNum and ui32SyncCount
  * are DROPPED in the WithFence ABI (the handler never used phSync/pbUpdate/SyncCount;
  * ClientCacheOpSeqNum now passed as 0). Keeping the old 68B layout made the UM's
@@ -406,8 +422,8 @@ typedef struct PVRSRV_BRIDGE_IN_DCDISPLAYCONTEXTCONFIGURE_TAG
 	IMG_HANDLE hDisplayContext;             /* @0  (8) */
 	PVRSRV_SURFACE_CONFIG_INFO *psSurfInfo; /* @8  (8) */
 	IMG_HANDLE *phBuffers;                  /* @16 (8) */
-	PVRSRV_TIMELINE hReleaseFenceTimeline;  /* @24 (4) */
-	PVRSRV_FENCE hAcquireFence;             /* @28 (4) */
+	PVRSRV_FENCE hAcquireFence;             /* @24 (4) */
+	PVRSRV_TIMELINE hReleaseFenceTimeline;  /* @28 (4) */
 	IMG_UINT32 ui32DisplayPeriod;           /* @32 (4) */
 	IMG_UINT32 ui32MaxDepth;                /* @36 (4) */
 	IMG_UINT32 ui32PipeCount;               /* @40 (4) */
