@@ -177,6 +177,13 @@ PVRSRV_ERROR SysDevInit(void *pvOSDevice, PVRSRV_DEVICE_CONFIG **ppsDevConfig)
 		dev_err(dev, "pvrsrvkm: failed to set 32-bit DMA mask\n");
 		return PVRSRV_ERROR_INIT_FAILURE;
 	}
+	/* Diagnostic (tsp-mc9m.9 round 5): round-3 faulted on a dma_mask FIELD
+	 * holding the literal mask value 0xffffffff at a site static analysis
+	 * says shares this exact struct device — log the wired state here so a
+	 * later mutation is visible in the boot log. Remove once explained. */
+	dev_info(dev, "pvrsrvkm: dma_mask ptr=%px val=%llx coherent=%llx\n",
+		 dev->dma_mask, dev->dma_mask ? *dev->dma_mask : 0ULL,
+		 dev->coherent_dma_mask);
 #endif
 
 	/*

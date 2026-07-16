@@ -30,9 +30,13 @@ enum scene_ctrl_cmd {
 	SCENE_CTRL_PERFORMANCE_MODE
 };
 
+struct reset_control;
+
 struct sunxi_clks {
 	struct clk *pll;
 	struct clk *core;
+	struct clk *bus;
+	struct reset_control *reset;
 };
 
 struct sunxi_clks_table {
