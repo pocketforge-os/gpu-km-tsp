@@ -177,8 +177,16 @@ $(PVRSRVKM_NAME)-y += $(foreach _m,$(INTERNAL_EXTRA_KBUILD_OBJECTS:.o=),$($(_m)-
 #obj-m += $(INTERNAL_KBUILD_OBJECTS)
 obj-$(CONFIG_DRM_IMG_ROGUE) += $(INTERNAL_KBUILD_OBJECTS)
 
-# dc_sunxi: fbdev-to-PVR-DC bridge (separate .ko, depends on pvrsrvkm)
+# dc_sunxi: fbdev-to-PVR-DC bridge (separate .ko, depends on pvrsrvkm).
+# It is a Linux *fbdev* display shim (uses registered_fb[], requires CONFIG_FB)
+# and is architecturally obsolete on a mainline kernel, whose A133 display path
+# is DRM/KMS (DE2/TCON/DSI) — a separate workstream, not this GPU KM. Set
+# PVR_HEADLESS_NO_DC=1 (e.g. for the mainline 6.x headless build, tsp-mc9m.1) to
+# build only the GPU KM and skip the display-class bridge. Default is unchanged,
+# so the 4.9-BSP build still builds dc_sunxi.
 ifeq ($(PVR_SYSTEM),sunxi_a133)
+ifneq ($(PVR_HEADLESS_NO_DC),1)
   include $(DDK_SRC)/services/3rdparty/dc_sunxi/Kbuild.mk
   obj-$(CONFIG_DRM_IMG_ROGUE) += dc_sunxi.o
+endif
 endif

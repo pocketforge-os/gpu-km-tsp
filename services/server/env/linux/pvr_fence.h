@@ -188,6 +188,28 @@ u32 pvr_fence_dump_info_on_stalled_ufos(struct pvr_fence_context *fctx,
 					u32 nr_ufos,
 					u32 *vaddrs);
 
+/*
+ * Ensure all PVR fence contexts have been destroyed, by draining the deferred
+ * destroy work (tsp-mc9m.1, mainline 6.x port).
+ *
+ * Historically this was a static inline that flushed the system-wide workqueue
+ * via flush_scheduled_work(). That is disallowed on Linux 6.8+
+ * (-Werror=attribute-warning: "Please avoid flushing system-wide workqueues").
+ *
+ * Behaviour is version-gated so every pre-6.8 build is byte-for-byte unchanged:
+ *   - < 6.8: the original inline (all configs), zero regression risk.
+ *   - >= 6.8: pvr_fence.c (which owns the deferred destroy work) is only
+ *     compiled when fence support is configured — see
+ *     services/server/env/linux/Kbuild.mk: SUPPORT_BUFFER_SYNC, or
+ *     SUPPORT_NATIVE_FENCE_SYNC + SUPPORT_DMA_FENCE. Only then is there any
+ *     destroy work to drain, so the real drain (flushing our dedicated destroy
+ *     workqueue) lives there; otherwise it is a no-op. The gate mirrors that
+ *     Kbuild condition exactly so the inline-no-op vs external-symbol choice
+ *     always matches whether pvr_fence.o is linked (module_common.c calls
+ *     pvr_fence_cleanup() unconditionally). The A133 spike build (sunxi_a133,
+ *     no fence support) takes the no-op branch.
+ */
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(6, 8, 0))
 static inline void pvr_fence_cleanup(void)
 {
 	/*
@@ -196,6 +218,12 @@ static inline void pvr_fence_cleanup(void)
 	 */
 	flush_scheduled_work();
 }
+#elif defined(SUPPORT_BUFFER_SYNC) || \
+	(defined(SUPPORT_NATIVE_FENCE_SYNC) && defined(SUPPORT_DMA_FENCE))
+void pvr_fence_cleanup(void);
+#else
+static inline void pvr_fence_cleanup(void) { }
+#endif
 
 #if defined(PVR_FENCE_DEBUG)
 #define PVR_FENCE_CTX_TRACE(c, fmt, ...)                                   \

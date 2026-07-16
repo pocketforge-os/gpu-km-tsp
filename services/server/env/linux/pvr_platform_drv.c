@@ -66,7 +66,15 @@
 /* This header must always be included last */
 #include "kernel_compatibility.h"
 
+/*
+ * MODULE_IMPORT_NS() takes a string literal from Linux 6.13 (previously a bare
+ * token). (tsp-mc9m.1, mainline 6.x port.)
+ */
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0))
+MODULE_IMPORT_NS("DMA_BUF");
+#else
 MODULE_IMPORT_NS(DMA_BUF);
+#endif
 
 static struct drm_driver pvr_drm_platform_driver;
 
@@ -222,7 +230,15 @@ err_drm_dev_put:
 #endif
 }
 
+/*
+ * struct platform_driver::remove() returns void from Linux 6.11 (previously
+ * int). (tsp-mc9m.1, mainline 6.x port.)
+ */
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0))
+static void pvr_remove(struct platform_device *pdev)
+#else
 static int pvr_remove(struct platform_device *pdev)
+#endif
 {
 	struct drm_device *ddev = platform_get_drvdata(pdev);
 
@@ -241,7 +257,9 @@ static int pvr_remove(struct platform_device *pdev)
 #else
 	drm_put_dev(ddev);
 #endif
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0))
 	return 0;
+#endif
 }
 
 static void pvr_shutdown(struct platform_device *pdev)

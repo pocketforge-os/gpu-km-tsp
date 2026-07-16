@@ -554,4 +554,72 @@ struct dma_buf_map {
 #define MODULE_IMPORT_NS(ns)
 #endif
 
+/*
+ * Mainline 6.x (kernel-sunxi-6.x @ device/a133, A133) port shims — tsp-mc9m.1.
+ * These extend the compat surface past the previous 6.3 ceiling for a 6.16 base.
+ */
+
+/*
+ * DRM_UNLOCKED was removed once all DRM ioctls became unlocked-by-default; on
+ * modern kernels it was already a no-op flag. Defining it to 0 keeps the
+ * original DRM_IOCTL_DEF_DRV(... | DRM_UNLOCKED) flag expressions building
+ * unchanged on kernels that dropped it, while leaving it untouched where it
+ * still exists.
+ */
+#if !defined(DRM_UNLOCKED)
+#define DRM_UNLOCKED 0
+#endif
+
+/*
+ * The timer API was renamed in Linux 6.16 (Kees Cook's timer cleanup series):
+ *   from_timer()     -> timer_container_of()
+ *   del_timer_sync() -> timer_delete_sync()
+ *   del_timer()      -> timer_delete()
+ * kernel_compatibility.h is always included last (after <linux/timer.h>), so the
+ * new symbols are already declared here. Map the old names onto the new ones.
+ */
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0))
+#define from_timer(var, callback_timer, timer_fieldname) \
+	timer_container_of(var, callback_timer, timer_fieldname)
+#define del_timer_sync(t) timer_delete_sync(t)
+#define del_timer(t) timer_delete(t)
+#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)) */
+
+/*
+ * Shrinker API overhaul in Linux 6.7: register_shrinker()/unregister_shrinker()
+ * over a caller-owned `struct shrinker` were removed in favour of an allocated,
+ * refcounted handle via shrinker_alloc()/shrinker_register()/shrinker_free().
+ * `struct shrinker` remains a complete type, so the DDK can keep its static
+ * `struct shrinker` (as a callback template). This shim allocates a handle,
+ * copies the caller's callbacks/seeks/batch into it, registers it, and stashes
+ * the handle in the caller struct's ->private_data so unregister can free it.
+ * (tsp-mc9m.1, mainline 6.x port.)
+ */
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0))
+static inline int pvr_register_shrinker(struct shrinker *s, const char *name)
+{
+	struct shrinker *a = shrinker_alloc(0, "%s", name);
+
+	if (!a)
+		return -ENOMEM;
+
+	a->count_objects = s->count_objects;
+	a->scan_objects  = s->scan_objects;
+	a->seeks         = s->seeks;
+	a->batch         = s->batch;
+	s->private_data  = a;
+	shrinker_register(a);
+	return 0;
+}
+static inline void pvr_unregister_shrinker(struct shrinker *s)
+{
+	if (s->private_data) {
+		shrinker_free((struct shrinker *)s->private_data);
+		s->private_data = NULL;
+	}
+}
+#define register_shrinker(s, ...) pvr_register_shrinker((s), __VA_ARGS__)
+#define unregister_shrinker(s)    pvr_unregister_shrinker(s)
+#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)) */
+
 #endif /* __KERNEL_COMPATIBILITY_H__ */
