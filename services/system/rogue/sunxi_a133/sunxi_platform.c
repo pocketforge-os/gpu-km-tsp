@@ -19,6 +19,7 @@
 
 #include "platform.h"
 #include <linux/clk-provider.h>
+#include <linux/reset.h>
 #include <linux/pm_runtime.h>
 #include <linux/pm_opp.h>
 #include <linux/regulator/consumer.h>
@@ -91,6 +92,25 @@ static inline int get_clks_wrap(struct device *dev)
 		dev_err(dev, "failed to get GPU core clock");
 		return -1;
 	}
+
+	/* Bus clock (dts clock-names "clk_bus", index 2) + RST_BUS_GPU reset —
+	 * gold-reference parity (kernel-sunxi-6.x rgx_sunxi glue). The vendor
+	 * 4.9 chain left the GPU bus clock running and the reset deasserted
+	 * from firmware, so this vendor glue never took them; mainline gates
+	 * unused clocks (clk_disable_unused) and does not deassert the reset,
+	 * leaving the whole GPU register block dead — observed live as
+	 * CORE_ID reads 0 (tsp-mc9m.9 rounds 2-3). */
+	sunxi_data->clks.bus = of_clk_get(dev->of_node, 2);
+	if (IS_ERR_OR_NULL(sunxi_data->clks.bus)) {
+		dev_err(dev, "failed to get GPU bus clock");
+		return -1;
+	}
+
+	sunxi_data->clks.reset = devm_reset_control_get(dev, NULL);
+	if (IS_ERR_OR_NULL(sunxi_data->clks.reset)) {
+		dev_err(dev, "failed to get GPU reset handle");
+		return -1;
+	}
 #endif /* defined(CONFIG_OF) */
 
 	return 0;
@@ -98,6 +118,11 @@ static inline int get_clks_wrap(struct device *dev)
 
 static inline long ppu_mode_switch(int mode, bool irq_enable)
 {
+	/* H616-family PPU pokes — compiled out on mainline A133 (gold-reference
+	 * parity, kernel-sunxi-6.x drivers/gpu/drm/img-rogue/system/rgx_sunxi:
+	 * these registers are vendor-BSP H616 addresses; on mainline the genpd
+	 * provider (sun50i-ppu) owns domain sequencing). */
+#if defined(CONFIG_ARCH_SUN50IW10)
 	long val;
 	/* Mask the power_request irq */
 	val = readl(sunxi_data->ppu_reg + PPU_IRQ_MASK_REG);
@@ -112,23 +137,39 @@ static inline long ppu_mode_switch(int mode, bool irq_enable)
 	writel(val, sunxi_data->ppu_reg + PPU_POWER_CTRL_REG);
 
 	return readl(sunxi_data->ppu_reg + PPU_POWER_CTRL_REG);
+#else
+	(void)mode; (void)irq_enable;
+	return 0;
+#endif
 }
 
 static inline void ppu_power_mode(int mode)
 {
+#if defined(CONFIG_ARCH_SUN50IW10)
 	unsigned int val;
 	val = readl(sunxi_data->ppu_reg + GPU_PD_STAT_REG);
 	val &= (~GPU_PD_STAT_MASK);
 	val += mode;
 	writel(val, sunxi_data->ppu_reg + GPU_PD_STAT_REG);
+#else
+	(void)mode;
+#endif
 }
 
 static inline void switch_interl_dfs(int val)
 {
+	/* GPU_CLK_CTRL_REG (0x01880020) is an H616 GPU-SYS register OUTSIDE the
+	 * A133 gpu node reg window (0x01800000+0x80000) — the round-3 readback
+	 * WARN at this site was this write landing on unbacked address space.
+	 * Gold-reference parity: body compiled out on mainline A133. */
+#if defined(CONFIG_ARCH_SUN50IW10)
 	unsigned int val2;
 	writel(val, sunxi_data->gpu_reg);
 	val2 = readl(sunxi_data->gpu_reg);
 	WARN_ON(val != val2);
+#else
+	(void)val;
+#endif
 }
 
 PVRSRV_ERROR sunxiPrePowerState(IMG_HANDLE hSysData,
@@ -742,12 +783,26 @@ int sunxi_platform_init(struct device *dev)
 		goto err_free;
 	}
 
+#if defined(CONFIG_ARCH_SUN50IW10)
+	/* Vendor-BSP-only PPU/GPU-SYS windows — see the body-guard comments on
+	 * ppu_mode_switch/switch_interl_dfs. Not mapped on mainline A133. */
 	sunxi_data->ppu_reg = ioremap(PPU_REG_BASE, PPU_REG_SIZE);
 	sunxi_data->gpu_reg = ioremap(GPU_CLK_CTRL_REG, 4);
+#endif
+
+	/* Bring the GPU register bus alive BEFORE any register access (the RGX
+	 * BVNC probe runs right after this returns): deassert RST_BUS_GPU and
+	 * enable the bus clock, then the pll/core clocks — gold-reference
+	 * ordering. The vendor 4.9 chain inherited both live from firmware, so
+	 * this glue historically skipped them; mainline gates unused clocks and
+	 * leaves the reset asserted, which read as CORE_ID==0 in rounds 2-3. */
+	reset_control_deassert(sunxi_data->clks.reset);
+	clk_prepare_enable(sunxi_data->clks.bus);
 	clk_prepare_enable(sunxi_data->clks.pll);
 	clk_prepare_enable(sunxi_data->clks.core);
 	sunxi_data->power_on = 0;
 
+#if defined(CONFIG_ARCH_SUN50IW10)
 	val = readl(sunxi_data->ppu_reg + GPU_PD_STAT_REG);
 	WARN_ON((val & GPU_PD_STAT_MASK) != GPU_PD_STAT_3D_MODE);
 	if (!sunxi_data->soft_mode) {
@@ -757,6 +812,9 @@ int sunxi_platform_init(struct device *dev)
 		val = ppu_mode_switch(POWER_CTRL_MODE_SW, true);
 		WARN_ON((val & POWER_CTRL_MODE_MASK) != POWER_CTRL_MODE_SW);
 	}
+#else
+	(void)val;
+#endif
 	sunxi_create_debugfs();
 	if (sysfs_create_group(&dev->kobj, &scene_ctrl_attribute_group)) {
 		dev_err(dev, "sunxi sysfs group creation failed!\n");
@@ -787,6 +845,12 @@ err_free:
 
 void sunxi_platform_term(void)
 {
+	/* Reverse of init ordering: clocks off (core, pll, bus), reset back
+	 * asserted, then drop the runtime-PM reference. */
+	clk_disable_unprepare(sunxi_data->clks.core);
+	clk_disable_unprepare(sunxi_data->clks.pll);
+	clk_disable_unprepare(sunxi_data->clks.bus);
+	reset_control_assert(sunxi_data->clks.reset);
 	pm_runtime_put_sync(sunxi_data->dev);
 	pm_runtime_disable(sunxi_data->dev);
 	debugfs_remove_recursive(sunxi_debugfs);
