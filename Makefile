@@ -190,3 +190,20 @@ ifneq ($(PVR_HEADLESS_NO_DC),1)
   obj-$(CONFIG_DRM_IMG_ROGUE) += dc_sunxi.o
 endif
 endif
+
+# dc_null: minimal hardware-free "null" Display Class backend (separate .ko,
+# depends on pvrsrvkm). Registers ONE synthetic scanout-less DC device so the
+# closed vendor NULL_WSEGL usermode driver can pass eglInitialize on the
+# mainline headless build (PVR_HEADLESS_NO_DC=1), where the fbdev-bound
+# dc_sunxi cannot be built and zero DC devices otherwise means a SILENT
+# eglInitialize EGL_NOT_INITIALIZED (0x3001). Root cause + rationale:
+# services/3rdparty/dc_null/dc_null.c header; bead tsp-mc9m.11; tsp-mc9m.9
+# round-7 analysis; precedent commit 576a8ef (tsp-cv7.4.3). OFF by default;
+# opt in with PVR_DC_NULL=1 (mutually exclusive in practice with dc_sunxi —
+# you want exactly one DC backend). No CONFIG_FB dependency.
+ifeq ($(PVR_SYSTEM),sunxi_a133)
+ifeq ($(PVR_DC_NULL),1)
+  include $(DDK_SRC)/services/3rdparty/dc_null/Kbuild.mk
+  obj-$(CONFIG_DRM_IMG_ROGUE) += dc_null.o
+endif
+endif
