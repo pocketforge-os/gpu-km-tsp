@@ -206,7 +206,13 @@ PVRSRV_ERROR OSPhyContigPagesAlloc(PHYS_HEAP *psPhysHeap, size_t uiSize,
 	gfp_flags = GFP_KERNEL;
 
 #if !defined(PVR_LINUX_PHYSMEM_USE_HIGHMEM_ONLY)
-	if (psDev)
+	/* dma_mask is a POINTER into the device; it can legitimately be NULL
+	 * (never wired by the bus/of layer) — never dereference it blindly.
+	 * Observed live on mainline A133 (tsp-mc9m.9): an unwired mask faulted
+	 * here at VA 0xffffffff (== DMA_BIT_MASK(32)). Fall back to the
+	 * unrestricted GFP_KERNEL path, same as psDev == NULL below.
+	 */
+	if (psDev && psDev->dma_mask)
 	{
 		if (*psDev->dma_mask == DMA_BIT_MASK(32))
 		{

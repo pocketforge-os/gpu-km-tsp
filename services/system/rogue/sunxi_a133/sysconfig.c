@@ -164,7 +164,19 @@ PVRSRV_ERROR SysDevInit(void *pvOSDevice, PVRSRV_DEVICE_CONFIG **ppsDevConfig)
 	sunxi_data = (struct sunxi_platform *)dev->platform_data;
 
 #if defined(__linux__)
-	dma_set_mask(pvOSDevice, DMA_BIT_MASK(32));
+	/* dma_coerce_mask_and_coherent(), not a bare dma_set_mask(): it wires
+	 * dev->dma_mask = &dev->coherent_dma_mask BEFORE writing the value, so
+	 * a platform device whose dma_mask pointer was never populated by the
+	 * bus/of layer cannot be left with an invalid pointer there. A bare
+	 * dma_set_mask() on such a device fails, the old code IGNORED that
+	 * failure, and the first *dev->dma_mask deref oopsed
+	 * (OSPhyContigPagesAlloc, VA 0xffffffff — tsp-mc9m.9, mainline A133).
+	 */
+	if (dma_coerce_mask_and_coherent(pvOSDevice, DMA_BIT_MASK(32)))
+	{
+		dev_err(dev, "pvrsrvkm: failed to set 32-bit DMA mask\n");
+		return PVRSRV_ERROR_INIT_FAILURE;
+	}
 #endif
 
 	/*
