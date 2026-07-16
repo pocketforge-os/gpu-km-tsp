@@ -61,6 +61,19 @@ static struct kmem_cache *pvr_fence_cache;
 static DEFINE_MUTEX(pvr_fence_cache_mutex);
 static u32 pvr_fence_cache_refcount;
 
+/*
+ * Dedicated workqueue for deferred pvr_fence context destruction (tsp-mc9m.1,
+ * mainline 6.x port). Historically fctx->destroy_work was queued on the
+ * system-wide workqueue and drained via flush_scheduled_work(), but flushing
+ * system-wide workqueues is disallowed on Linux 6.x
+ * (-Werror=attribute-warning). We own a dedicated wq instead, created lazily
+ * alongside the fence cache and flushed in pvr_fence_cleanup(). It is
+ * long-lived for the module's lifetime (mirroring the previous reliance on the
+ * never-torn-down system workqueue) so the refcount->0 destroy path — which
+ * runs *on* this wq — never tears down the wq it is executing on.
+ */
+static struct workqueue_struct *pvr_fence_destroy_wq;
+
 #define PVR_DUMPDEBUG_LOG(pfnDumpDebugPrintf, pvDumpDebugFile, fmt, ...) \
 	do {                                                             \
 		if (pfnDumpDebugPrintf)                                  \
@@ -384,6 +397,25 @@ pvr_fence_context_create_internal(struct workqueue_struct *fence_status_wq,
 			goto err_unregister_cmd_complete_notify;
 		}
 	}
+	/*
+	 * Lazily create the long-lived dedicated destroy workqueue (tsp-mc9m.1).
+	 * Guarded on NULL so repeated 0->1 refcount cycles reuse the same wq
+	 * instead of leaking a new one.
+	 */
+	if (!pvr_fence_destroy_wq) {
+		pvr_fence_destroy_wq =
+			create_singlethread_workqueue("pvr_fence_destroy");
+		if (!pvr_fence_destroy_wq) {
+			pr_err("%s: failed to allocate pvr_fence destroy wq\n",
+					__func__);
+			if (pvr_fence_cache_refcount == 0) {
+				kmem_cache_destroy(pvr_fence_cache);
+				pvr_fence_cache = NULL;
+			}
+			mutex_unlock(&pvr_fence_cache_mutex);
+			goto err_unregister_cmd_complete_notify;
+		}
+	}
 	pvr_fence_cache_refcount++;
 	mutex_unlock(&pvr_fence_cache_mutex);
 
@@ -506,7 +538,31 @@ static void pvr_fence_context_destroy_kref(struct kref *kref)
 
 	trace_pvr_fence_context_destroy_kref(fctx);
 
-	schedule_work(&fctx->destroy_work);
+	/*
+	 * Queue on our dedicated destroy wq rather than the system-wide workqueue
+	 * (tsp-mc9m.1). Fall back to schedule_work() only in the unlikely event the
+	 * dedicated wq is not yet allocated — a context must have been created (and
+	 * thus the wq allocated) before it can be destroyed, so this is defensive.
+	 */
+	if (pvr_fence_destroy_wq)
+		queue_work(pvr_fence_destroy_wq, &fctx->destroy_work);
+	else
+		schedule_work(&fctx->destroy_work);
+}
+
+/**
+ * pvr_fence_cleanup - drain deferred pvr_fence context destruction
+ *
+ * Ensures all outstanding pvr_fence context destroy work has completed by
+ * flushing the dedicated destroy workqueue. Previously this flushed the
+ * system-wide workqueue (flush_scheduled_work()), which is disallowed on
+ * Linux 6.x. Called from the module/sync teardown paths, never from work
+ * running on the destroy wq, so it is safe to flush here. (tsp-mc9m.1)
+ */
+void pvr_fence_cleanup(void)
+{
+	if (pvr_fence_destroy_wq)
+		flush_workqueue(pvr_fence_destroy_wq);
 }
 
 /**

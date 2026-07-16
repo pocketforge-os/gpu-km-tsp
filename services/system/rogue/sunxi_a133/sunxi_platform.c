@@ -30,7 +30,16 @@
 #include <linux/thermal.h>
 #include "rgxdevice.h"
 
-#if defined(CONFIG_ARCH_SUN50IW10)
+/*
+ * A133 GPU PPU / clock register map. Historically gated on the vendor-BSP-only
+ * Kconfig symbol CONFIG_ARCH_SUN50IW10, which does not exist on a mainline
+ * kernel (mainline uses the generic CONFIG_ARCH_SUNXI + device tree, with the
+ * A133 as sun50i-a100/a133). These are A133 hardware constants and this file
+ * only ever builds for PVR_SYSTEM=sunxi_a133, so also accept CONFIG_ARCH_SUNXI
+ * to cover the mainline 6.x build; the vendor 4.9 build (both symbols set) is
+ * unchanged. (tsp-mc9m.1, mainline 6.x port.)
+ */
+#if defined(CONFIG_ARCH_SUN50IW10) || defined(CONFIG_ARCH_SUNXI)
 #define PPU_REG_BASE		(0x07001000)
 #define GPU_SYS_REG_BASE		(0x01880000)
 #define GPU_RSTN_REG		(0x0)

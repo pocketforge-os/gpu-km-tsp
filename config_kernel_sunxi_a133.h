@@ -224,3 +224,46 @@
 #define RGX_NUM_DRIVERS_SUPPORTED 1
 #define RGX_VZ_CONNECTION_TIMEOUT_US 60000000
 #define SUPPORT_RGXKICKSYNC_BRIDGE
+
+/*
+ * ---------------------------------------------------------------------------
+ * Mainline 6.x (kernel-sunxi-6.x @ device/a133) port shims — tsp-mc9m.1.
+ *
+ * This header is force-included into every DDK translation unit for the
+ * sunxi_a133 build (Makefile: `ccflags-y += -include config_kernel_sunxi_a133.h`),
+ * so it is the one reliable place to land a compat shim that every source file
+ * needs regardless of whether it includes kernel_compatibility.h. All shims are
+ * kernel-version-guarded so they stay INERT on the 4.9 build that shares this
+ * repo's main branch.
+ * ---------------------------------------------------------------------------
+ */
+#if defined(__KERNEL__)
+#include <linux/version.h>
+
+/*
+ * strlcpy() was removed in Linux 6.8 (commit "string: Remove strlcpy()") in
+ * favour of strscpy(), which has different return semantics: strscpy() returns
+ * the number of bytes copied or -E2BIG on truncation, whereas the DDK relies on
+ * strlcpy()'s contract of returning strlen(src) — e.g. km_apphint.c's
+ * `if (strlcpy(...) < size)` truncation check and mem_utils.c's use of the
+ * return value as the source length. A naive `#define strlcpy strscpy` would
+ * therefore silently break those checks, so we reprovide true strlcpy semantics.
+ */
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0))
+#include <linux/string.h>
+static inline size_t pvr_compat_strlcpy(char *dest, const char *src, size_t size)
+{
+	size_t srclen = strlen(src);
+
+	if (size) {
+		size_t len = (srclen >= size) ? size - 1 : srclen;
+
+		memcpy(dest, src, len);
+		dest[len] = '\0';
+	}
+	return srclen;
+}
+#define strlcpy pvr_compat_strlcpy
+#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)) */
+
+#endif /* defined(__KERNEL__) */

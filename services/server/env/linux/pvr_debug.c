@@ -42,6 +42,13 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */ /**************************************************************************/
 
 #include <linux/sched.h>
+/*
+ * task_tgid_nr() moved out of <linux/sched.h> into <linux/pid.h> in Linux 6.16;
+ * include it explicitly. <linux/pid.h> is long-standing, so this is safe on
+ * older kernels too (where task_tgid_nr still comes from <linux/sched.h>).
+ * (tsp-mc9m.1, mainline 6.x port.)
+ */
+#include <linux/pid.h>
 #include <linux/moduleparam.h>
 
 #include "img_types.h"
