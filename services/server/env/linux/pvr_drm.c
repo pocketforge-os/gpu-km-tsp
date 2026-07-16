@@ -448,6 +448,16 @@ const struct file_operations pvr_drm_fops = {
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 12, 0))
 	.fasync			= drm_fasync,
 #endif
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0))
+	/* Mandatory since 6.12 ("fs: move FMODE_UNSIGNED_OFFSET to fop_flags"):
+	 * drm_open_helper() WARN_ON_ONCE()s and returns -EINVAL on EVERY open of
+	 * our /dev/dri nodes without this bit, before pvr_drm_open() ever runs —
+	 * observed live as eglInitialize()==EGL_NOT_INITIALIZED with zero bridge
+	 * traffic (tsp-mc9m.9 round 5). The in-kernel img-rogue reference driver
+	 * carries the same line unconditionally; guarded here because this tree
+	 * still builds against the vendor 4.9 kernel too. */
+	.fop_flags		= FOP_UNSIGNED_OFFSET,
+#endif
 };
 
 const struct drm_driver pvr_drm_generic_driver = {
