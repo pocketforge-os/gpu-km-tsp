@@ -263,6 +263,10 @@ static int sunxi_decide_pll(struct sunxi_platform *sunxi)
 	u32 val2;
 	int err;
 	sunxi->pll_clk_rate = 500000000;
+	if (!sunxi->dev || !sunxi->dev->of_node) {
+		pr_err("pvrsrvkm: %s: no of_node for GPU device\n", __func__);
+		return -ENODEV;
+	}
 	err = of_property_read_u32(sunxi->dev->of_node, "pll_rate", &val2);
 	if (!err)
 		sunxi->pll_clk_rate = val2 * 1000;
@@ -652,6 +656,7 @@ int sunxi_platform_init(struct device *dev)
 #endif /* defined(CONFIG_OF) */
 	unsigned int val, volt_val = 0;
 	char ic_version = 0;
+	int err;
 	sunxi_data = (struct sunxi_platform *)kzalloc(sizeof(struct sunxi_platform), GFP_KERNEL);
 	if (!sunxi_data) {
 		dev_err(dev, "failed to get kzalloc sunxi_platform");
@@ -700,7 +705,17 @@ int sunxi_platform_init(struct device *dev)
 	}
 	dev_info(dev, "IC version: 0x%08x , power_idle:%d\n", ic_version, sunxi_data->power_idle);
 
-	sunxi_decide_pll(sunxi_data);
+	/* A failed table build leaves clk_table/current_clk NULL, and later
+	 * consumers (sunxiPrePowerState, sunxi_set_freq_safe, debugfs/sysfs)
+	 * dereference them unconditionally — fail the probe cleanly instead
+	 * of arming a latent NULL deref (mainline dtbs differ from vendor;
+	 * absent/malformed "operating-points" must not crash).
+	 */
+	err = sunxi_decide_pll(sunxi_data);
+	if (err) {
+		dev_err(dev, "failed to build GPU clk/OPP table from DT (operating-points absent or invalid): %d\n", err);
+		return err;
+	}
 	spin_lock_init(&sunxi_data->lock);
 	pm_runtime_enable(dev);
 
