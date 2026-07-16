@@ -671,7 +671,8 @@ int sunxi_platform_init(struct device *dev)
 	reg_res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (reg_res == NULL) {
 		dev_err(dev, "failed to get register data from device tree");
-		return -1;
+		err = -1;
+		goto err_free;
 	}
 	sunxi_data->reg_base = reg_res->start;
 	sunxi_data->reg_size = reg_res->end - reg_res->start + 1;
@@ -680,15 +681,18 @@ int sunxi_platform_init(struct device *dev)
 	sunxi_data->irq_num = platform_get_irq_byname(pdev, "IRQGPU");
 	if (sunxi_data->irq_num < 0) {
 		dev_err(dev, "failed to get irq number from device tree");
-		return -1;
+		err = -1;
+		goto err_free;
 	}
 #endif /* defined(CONFIG_OF) */
 	sunxi_data->regula = regulator_get_optional(dev, "gpu");
 	if (!IS_ERR_OR_NULL(sunxi_data->regula))
 		volt_val = regulator_get_voltage(sunxi_data->regula);
 
-	if (get_clks_wrap(dev))
-		return -1;
+	if (get_clks_wrap(dev)) {
+		err = -1;
+		goto err_free;
+	}
 
 	sunxi_data->power_idle = 1;
 	sunxi_data->dvfs = 1;
@@ -714,10 +718,29 @@ int sunxi_platform_init(struct device *dev)
 	err = sunxi_decide_pll(sunxi_data);
 	if (err) {
 		dev_err(dev, "failed to build GPU clk/OPP table from DT (operating-points absent or invalid): %d\n", err);
-		return err;
+		goto err_free;
 	}
 	spin_lock_init(&sunxi_data->lock);
 	pm_runtime_enable(dev);
+
+	/* Power the GPU genpd domain ON before any register access. This
+	 * vendor glue was written for the 4.9 world where boot firmware
+	 * pre-powers the GPU domain, so it only ever pm_runtime_enable()d
+	 * and poked the PPU registers directly. On mainline the domain is
+	 * driven by genpd (sun50i-ppu, CONFIG_SUN50I_PPU) and starts OFF on
+	 * the FEL/RAM-boot path — nobody else powers it, so the PD_STAT
+	 * read below and the caller's RGX BVNC probe would read a gated,
+	 * zeroed register block (observed live: "CORE_ID register returns
+	 * zero", tsp-mc9m.9). Hold one reference for the life of the load;
+	 * sunxiPrePowerState/sunxiPostPowerState layer their own get/put on
+	 * top for active power management.
+	 */
+	err = pm_runtime_get_sync(dev);
+	if (err < 0) {
+		dev_err(dev, "failed to power GPU domain on (pm_runtime_get_sync): %d\n", err);
+		pm_runtime_disable(dev);
+		goto err_free;
+	}
 
 	sunxi_data->ppu_reg = ioremap(PPU_REG_BASE, PPU_REG_SIZE);
 	sunxi_data->gpu_reg = ioremap(GPU_CLK_CTRL_REG, 4);
@@ -751,10 +774,20 @@ int sunxi_platform_init(struct device *dev)
 		volt_val, clk_get_rate(sunxi_data->clks.core));
 
 	return 0;
+
+err_free:
+	/* Probe failed: free the platform data and clear the stale pointer so
+	 * a re-probe/module reload does not see a dangling dev->platform_data
+	 * (PR#8 review follow-up). */
+	kfree(sunxi_data);
+	sunxi_data = NULL;
+	dev->platform_data = NULL;
+	return err;
 }
 
 void sunxi_platform_term(void)
 {
+	pm_runtime_put_sync(sunxi_data->dev);
 	pm_runtime_disable(sunxi_data->dev);
 	debugfs_remove_recursive(sunxi_debugfs);
 	sysfs_remove_group(&sunxi_data->dev->kobj, &scene_ctrl_attribute_group);
