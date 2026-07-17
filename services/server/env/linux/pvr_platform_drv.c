@@ -161,7 +161,16 @@ static void pvr_devices_unregister(void)
 #if defined(MODULE) && !defined(PVR_LDM_PLATFORM_PRE_REGISTERED)
 	unsigned int i;
 
-	BUG_ON(!pvr_devices);
+	/*
+	 * pvr_devices_register() is disabled in this fork (the GPU platform
+	 * device comes from the device tree, not a self-registered synthetic
+	 * device), so pvr_devices is never allocated. The upstream
+	 * BUG_ON(!pvr_devices) here made every rmmod fatal (kernel BUG in
+	 * pvr_exit); treat "nothing registered" as a no-op instead.
+	 * (tsp-mc9m.10, mainline 6.x port.)
+	 */
+	if (!pvr_devices)
+		return;
 
 	for (i = 0; i < pvr_num_devices && pvr_devices[i]; i++)
 		platform_device_unregister(pvr_devices[i]);
