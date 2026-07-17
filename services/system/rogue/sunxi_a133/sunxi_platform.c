@@ -846,13 +846,57 @@ err_free:
 void sunxi_platform_term(void)
 {
 	/* Reverse of init ordering: clocks off (core, pll, bus), reset back
-	 * asserted, then drop the runtime-PM reference. */
+	 * asserted, then release ALL runtime-PM references and hand the GPU
+	 * power domain back so a module reload (insmod -> rmmod -> insmod)
+	 * re-initialises from a cold-boot-equivalent state.
+	 *
+	 * TWO runtime-PM references are outstanding here, not one:
+	 *   - the init reference taken by pm_runtime_get_sync() in
+	 *     sunxi_platform_init() (held for the life of the load); and
+	 *   - the operational reference taken by sunxiPrePowerState() on the
+	 *     first power-on. sunxiPostPowerState() only drops that reference
+	 *     when power_idle is set, and sunxi_ic_version_ctrl() forces
+	 *     power_idle=0 on this silicon (IC versions 0/3/4/5, "always keep
+	 *     domainA poweron"), so it is still held at teardown with
+	 *     sunxi_data->power_on == 1.
+	 * Dropping only the init reference (the previous behaviour) left the
+	 * device runtime-active with the sun50i-ppu GPU power domain still
+	 * voted on and pm_runtime_disable() called while active; the driver-core
+	 * genpd detach on unbind then could not return the domain to a cold
+	 * state, so the next insmod's HW bring-up in sunxi_platform_init()
+	 * failed and SysDevInit() returned PVRSRV_ERROR_INIT_FAILURE
+	 * (tsp-mc9m.15.5). The first insmod's device-init was unaffected because
+	 * it starts from the genuine cold power-on state.
+	 *
+	 * pm_runtime_disable() first, then pm_runtime_put_noidle() +
+	 * pm_runtime_set_suspended(): the *_noidle put and the explicit
+	 * set_suspended reconcile the usage count and drop the domain vote
+	 * WITHOUT re-entering the services runtime-suspend callback
+	 * (pvr_pm_runtime_suspend -> sPVRSRVDeviceSuspend), which dereferences
+	 * the device node that PVRSRV is in the middle of destroying when it
+	 * calls SysDevDeInit -> sunxi_platform_term. A pm_runtime_put_sync()
+	 * here would trip that callback on a half-torn-down device node.
+	 */
 	clk_disable_unprepare(sunxi_data->clks.core);
 	clk_disable_unprepare(sunxi_data->clks.pll);
 	clk_disable_unprepare(sunxi_data->clks.bus);
 	reset_control_assert(sunxi_data->clks.reset);
-	pm_runtime_put_sync(sunxi_data->dev);
+
 	pm_runtime_disable(sunxi_data->dev);
+	if (sunxi_data->power_on) {
+		pm_runtime_put_noidle(sunxi_data->dev);
+		sunxi_data->power_on = 0;
+	}
+	pm_runtime_put_noidle(sunxi_data->dev);
+	pm_runtime_set_suspended(sunxi_data->dev);
+
+	/* pll/core/bus come from of_clk_get() (not devm_clk_get) — release the
+	 * handles so they do not leak across reload cycles. The reset handle is
+	 * devm-managed and is freed by the driver core on unbind. */
+	clk_put(sunxi_data->clks.core);
+	clk_put(sunxi_data->clks.pll);
+	clk_put(sunxi_data->clks.bus);
+
 	debugfs_remove_recursive(sunxi_debugfs);
 	sysfs_remove_group(&sunxi_data->dev->kobj, &scene_ctrl_attribute_group);
 	kfree(sunxi_data);
