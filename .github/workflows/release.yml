@@ -1,7 +1,18 @@
 # release.yml — GPU KM (pvrsrvkm.ko + dc_sunxi.ko) reproducible release build
 #
 # Trigger: push of tags matching tsp-pvr-*
-# Runner:  self-hosted Dell runner (has kubo for IPFS publishing)
+# Runner:  self-hosted Dell build runner (trimui-build-lab — has kubo for IPFS publishing).
+#          Targeted by its SPECIFIC `build-lab` label (tsp-ikk0.22): the old generic
+#          [self-hosted, linux, x64] labels would have routed this job onto the pf-review-vm
+#          lane (Default runner group visibility=all), which has no ARM toolchain and no kubo.
+#          NOTE: gpu-km-tsp is NOT yet on the build-lab runner group's allow-list, so this job
+#          cannot schedule until the owner adds the repo to runner group `build-lab` (org-admin;
+#          listed on bead tsp-ikk0.22's owner batch). Fail-closed by design until then.
+#          STALENESS WARNING: this workflow still clones the ARCHIVED kernel-tsp repo (orphaned
+#          by the tsp-1dl.2 B2 rename to kernel-sunxi-4.9, which is private) and signs via a
+#          RELEASE_SECRET_KEY_FILE repo secret (predates the infra-060 OIDC `sign`-environment
+#          lane — see mission-control .claude/rules/secrets.md). It has never fired (no tsp-pvr-*
+#          tags exist) and MUST be modernized before the first release tag is pushed.
 # Purpose: reproducible build of GPU kernel modules, sign with PocketForge
 #          release key, publish to GitHub Releases + IPFS via vendor-manifest.
 #
@@ -34,12 +45,13 @@ env:
 jobs:
   release:
     name: Build, verify, sign, publish
-    runs-on: [self-hosted, linux, x64]
+    runs-on: [self-hosted, build-lab]
     timeout-minutes: 30
 
     steps:
       - name: Checkout gpu-km-tsp
-        uses: actions/checkout@v4
+        # SHA-pinned (org Actions policy sha_pinning_required=true; bare @v4 = startup_failure)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
       - name: Parse tag metadata
         id: meta
