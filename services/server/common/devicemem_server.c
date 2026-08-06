@@ -63,6 +63,19 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "pvrsrv.h" /* for PVRSRVGetPVRSRVData() */
 
+#if defined(PF_ODYSSEY_CAPTURE)
+#include <linux/list.h>
+#include <linux/mutex.h>
+#include <linux/overflow.h>
+#define ODYSSEY_CAPTURE_MAX_RECORD (64U * 1024U)
+extern bool g_bOdysseyCapture;
+static LIST_HEAD(g_sOdysseyMappings);
+static DEFINE_MUTEX(g_sOdysseyMappingsLock);
+PVRSRV_ERROR DevmemIntDiagAcquirePMR(IMG_DEV_VIRTADDR sDevVAddr,
+		IMG_DEVMEM_SIZE_T uiSize, PMR **ppsPMR,
+		IMG_DEVMEM_OFFSET_T *puiPMROffset, const IMG_CHAR **ppszReason);
+#endif
+
 #define DEVMEMCTX_FLAGS_FAULT_ADDRESS_AVAILABLE (1 << 0)
 #define DEVMEMHEAP_REFCOUNT_MIN 1
 #define DEVMEMHEAP_REFCOUNT_MAX IMG_INT32_MAX
@@ -143,7 +156,72 @@ struct _DEVMEMINT_MAPPING_
 	struct _DEVMEMINT_RESERVATION_ *psReservation;
 	PMR *psPMR;
 	IMG_UINT32 uiNumPages;
+#if defined(PF_ODYSSEY_CAPTURE)
+	struct list_head sOdysseyNode;
+	IMG_PID uiOdysseyPID;
+#endif
 };
+
+#if defined(PF_ODYSSEY_CAPTURE)
+PVRSRV_ERROR DevmemIntDiagAcquirePMR(IMG_DEV_VIRTADDR sDevVAddr,
+		IMG_DEVMEM_SIZE_T uiSize, PMR **ppsPMR,
+		IMG_DEVMEM_OFFSET_T *puiPMROffset, const IMG_CHAR **ppszReason)
+{
+	DEVMEMINT_MAPPING *psMapping, *psFound = NULL;
+	IMG_UINT64 uiEnd;
+	IMG_PID uiPID = OSGetCurrentClientProcessIDKM();
+
+	*ppsPMR = NULL;
+	*ppszReason = "unmapped";
+	if (uiSize == 0 || uiSize > ODYSSEY_CAPTURE_MAX_RECORD ||
+		check_add_overflow(sDevVAddr.uiAddr, (IMG_UINT64)uiSize, &uiEnd))
+	{
+		*ppszReason = "range-overflow";
+		return PVRSRV_ERROR_INVALID_PARAMS;
+	}
+
+	mutex_lock(&g_sOdysseyMappingsLock);
+	list_for_each_entry(psMapping, &g_sOdysseyMappings, sOdysseyNode)
+	{
+		IMG_UINT64 uiBase = psMapping->psReservation->sBase.uiAddr;
+		IMG_UINT64 uiLimit = uiBase + psMapping->psReservation->uiLength;
+		if (psMapping->uiOdysseyPID == uiPID &&
+			sDevVAddr.uiAddr >= uiBase && uiEnd <= uiLimit)
+		{
+			if (psFound != NULL)
+			{
+				*ppszReason = "ambiguous-context";
+				mutex_unlock(&g_sOdysseyMappingsLock);
+				return PVRSRV_ERROR_INVALID_PARAMS;
+			}
+			psFound = psMapping;
+		}
+	}
+	if (psFound != NULL)
+	{
+		IMG_DEVMEM_SIZE_T uiPMRSize;
+		IMG_DEVMEM_OFFSET_T uiPMROffset = sDevVAddr.uiAddr - psFound->psReservation->sBase.uiAddr;
+		PMR_LogicalSize(psFound->psPMR, &uiPMRSize);
+		if (PMR_IsSparse(psFound->psPMR))
+		{
+			*ppszReason = "sparse-pmr";
+		}
+		else if (uiPMROffset > uiPMRSize || uiSize > uiPMRSize - uiPMROffset)
+		{
+			*ppszReason = "pmr-range";
+		}
+		else
+		{
+			PMRRefPMR(psFound->psPMR);
+			*ppsPMR = psFound->psPMR;
+			*puiPMROffset = uiPMROffset;
+			*ppszReason = NULL;
+		}
+	}
+	mutex_unlock(&g_sOdysseyMappingsLock);
+	return *ppsPMR != NULL ? PVRSRV_OK : PVRSRV_ERROR_INVALID_PARAMS;
+}
+#endif
 
 /*! Object representing a virtual range reservation and mapping between
  * the virtual range and a set of PMRs.
@@ -914,6 +992,20 @@ DevmemIntMapPMR(DEVMEMINT_HEAP *psDevmemHeap,
 	psMapping->uiNumPages = ui32NumDevPages;
 	psMapping->psPMR = psPMR;
 
+#if defined(PF_ODYSSEY_CAPTURE)
+	INIT_LIST_HEAD(&psMapping->sOdysseyNode);
+	if (g_bOdysseyCapture)
+	{
+		/* DevmemIntMapPMR has no connection argument in this DDK. Scope the
+		 * diagnostic lookup to the calling client PID and reject ambiguous
+		 * address ranges rather than widening the production map API. */
+		psMapping->uiOdysseyPID = OSGetCurrentClientProcessIDKM();
+		mutex_lock(&g_sOdysseyMappingsLock);
+		list_add_tail(&psMapping->sOdysseyNode, &g_sOdysseyMappings);
+		mutex_unlock(&g_sOdysseyMappingsLock);
+	}
+#endif
+
 	*ppsMappingPtr = psMapping;
 
 	return PVRSRV_OK;
@@ -950,6 +1042,15 @@ DevmemIntUnmapPMR(DEVMEMINT_MAPPING *psMapping)
 	/* number of pages (device pages) that allocation spans */
 	IMG_UINT32 ui32NumDevPages;
 	IMG_BOOL bIsSparse = IMG_FALSE;
+
+#if defined(PF_ODYSSEY_CAPTURE)
+	if (!list_empty(&psMapping->sOdysseyNode))
+	{
+		mutex_lock(&g_sOdysseyMappingsLock);
+		list_del_init(&psMapping->sOdysseyNode);
+		mutex_unlock(&g_sOdysseyMappingsLock);
+	}
+#endif
 
 	ui32NumDevPages = psMapping->uiNumPages;
 	sAllocationDevVAddr = psMapping->psReservation->sBase;

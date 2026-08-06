@@ -178,7 +178,32 @@ typedef struct _RGX_KM_HW_RT_DATASET_
 	DLLIST_NODE			sNodeHWRTData;
 #endif
 
+#if defined(PF_ODYSSEY_CAPTURE)
+	PMR *psOdysseyPMR;
+	IMG_DEVMEM_OFFSET_T uiOdysseyPMROffset;
+	IMG_DEV_VIRTADDR sOdysseyDevVAddr;
+	IMG_UINT64 ui64OdysseyCaptureId;
+	IMG_UINT32 ui32OdysseyRgnHeaderSize;
+	IMG_UINT32 ui32OdysseyTEMTILE1, ui32OdysseyTEMTILE2;
+	IMG_UINT32 ui32OdysseyTEScreen, ui32OdysseyISPMtileSize;
+	IMG_UINT32 ui32OdysseyRT;
+	IMG_BOOL bOdysseyFirstKickCaptured;
+#endif
+
 } RGX_KM_HW_RT_DATASET;
+
+#if defined(PF_ODYSSEY_CAPTURE)
+void RGXOdysseyCaptureCreate(CONNECTION_DATA *psConnection,
+		const IMG_DEV_VIRTADDR *pasRgnHeaderDevVAddr,
+		IMG_UINT32 ui32RgnHeaderSize, IMG_UINT32 ui32TEMTILE1,
+		IMG_UINT32 ui32TEMTILE2, IMG_UINT32 ui32TEScreen,
+		IMG_UINT32 ui32ISPMtileSize, IMG_UINT64 *pui64CaptureId);
+void RGXOdysseyCaptureRetain(RGX_KM_HW_RT_DATASET **pasDataSets,
+		const IMG_DEV_VIRTADDR *pasRgnHeaderDevVAddr,
+		IMG_UINT32 ui32RgnHeaderSize, IMG_UINT32 ui32TEMTILE1,
+		IMG_UINT32 ui32TEMTILE2, IMG_UINT32 ui32TEScreen,
+		IMG_UINT32 ui32ISPMtileSize, IMG_UINT64 ui64CaptureId);
+#endif
 
 struct _RGX_PMR_NODE_ {
 	RGX_FREELIST			*psFreeList;
