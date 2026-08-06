@@ -77,7 +77,6 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #if defined(PF_ODYSSEY_CAPTURE)
 #include <crypto/hash.h>
 #include <linux/atomic.h>
-#include <linux/base64.h>
 #include <linux/moduleparam.h>
 
 #define ODYSSEY_CAPTURE_MAX_RECORD (64U * 1024U)
@@ -85,11 +84,41 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 extern PVRSRV_ERROR DevmemIntDiagAcquirePMR(IMG_DEV_VIRTADDR sDevVAddr,
 		IMG_DEVMEM_SIZE_T uiSize, PMR **ppsPMR,
 		IMG_DEVMEM_OFFSET_T *puiPMROffset, const IMG_CHAR **ppszReason);
-static bool g_bOdysseyCapture;
+bool g_bOdysseyCapture;
 module_param_named(odyssey_capture, g_bOdysseyCapture, bool, 0600);
 MODULE_PARM_DESC(odyssey_capture, "Enable bounded ODYSSEY region-header capture");
 static atomic64_t g_ui64OdysseyId = ATOMIC64_INIT(0);
 static atomic64_t g_ui64OdysseyBytes = ATOMIC64_INIT(0);
+
+static IMG_BOOL _OdysseyBase64Encode(const IMG_UINT8 *src, IMG_UINT32 src_len,
+		IMG_CHAR *dst, IMG_UINT32 dst_size, IMG_UINT32 *encoded_len)
+{
+	static const IMG_CHAR alphabet[] =
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	IMG_UINT32 i, o = 0;
+	IMG_UINT32 needed = ((src_len + 2U) / 3U) * 4U;
+
+	if (dst_size <= needed)
+		return IMG_FALSE;
+
+	for (i = 0; i < src_len; i += 3U)
+	{
+		IMG_UINT32 remaining = src_len - i;
+		IMG_UINT32 value = (IMG_UINT32)src[i] << 16;
+
+		if (remaining > 1U)
+			value |= (IMG_UINT32)src[i + 1U] << 8;
+		if (remaining > 2U)
+			value |= src[i + 2U];
+		dst[o++] = alphabet[(value >> 18) & 0x3fU];
+		dst[o++] = alphabet[(value >> 12) & 0x3fU];
+		dst[o++] = remaining > 1U ? alphabet[(value >> 6) & 0x3fU] : '=';
+		dst[o++] = remaining > 2U ? alphabet[value & 0x3fU] : '=';
+	}
+	dst[o] = '\0';
+	*encoded_len = o;
+	return IMG_TRUE;
+}
 
 static void _OdysseyError(IMG_UINT64 id, IMG_UINT32 rt, IMG_DEV_VIRTADDR va,
 		IMG_UINT32 bytes, IMG_UINT32 t1, IMG_UINT32 t2, IMG_UINT32 screen,
@@ -121,11 +150,13 @@ static void _OdysseyDump(PMR *pmr, IMG_DEVMEM_OFFSET_T off, IMG_UINT64 id,
 	tfm = crypto_alloc_shash("sha256", 0, 0);
 	if (IS_ERR(tfm)) { PMRReleaseKernelMappingData(pmr, priv); _OdysseyError(id, rt, va, bytes, t1, t2, screen, isp, "sha256-unavailable"); return; }
 	desc = OSAllocMem(sizeof(*desc) + crypto_shash_descsize(tfm));
-	b64 = OSAllocMem(BASE64_CHARS(bytes) + 1);
+	encoded = ((bytes + 2U) / 3U) * 4U;
+	b64 = OSAllocMem(encoded + 1U);
 	if (!desc || !b64) { if (desc) OSFreeMem(desc); if (b64) OSFreeMem(b64); crypto_free_shash(tfm); PMRReleaseKernelMappingData(pmr, priv); _OdysseyError(id, rt, va, bytes, t1, t2, screen, isp, "out-of-memory"); return; }
 	desc->tfm = tfm;
 	err = crypto_shash_digest(desc, addr, bytes, digest) ? PVRSRV_ERROR_INVALID_PARAMS : PVRSRV_OK;
-	encoded = base64_encode(addr, bytes, b64); b64[encoded] = '\0';
+	if (!_OdysseyBase64Encode(addr, bytes, b64, encoded + 1U, &encoded))
+		err = PVRSRV_ERROR_INVALID_PARAMS;
 	PMRReleaseKernelMappingData(pmr, priv);
 	if (err != PVRSRV_OK) { OSFreeMem(b64); OSFreeMem(desc); crypto_free_shash(tfm); _OdysseyError(id, rt, va, bytes, t1, t2, screen, isp, "sha256-failed"); return; }
 	for (i = 0; i < 32; i++) OSSNPrintf(&hex[i * 2], 3, "%02x", digest[i]);
@@ -159,7 +190,7 @@ void RGXOdysseyCaptureRetain(RGX_KM_HW_RT_DATASET **sets, const IMG_DEV_VIRTADDR
 		IMG_UINT32 bytes, IMG_UINT32 t1, IMG_UINT32 t2, IMG_UINT32 screen,
 		IMG_UINT32 isp, IMG_UINT64 id)
 {
-	IMG_UINT32 i; if (!id) return;
+	IMG_UINT32 i; if (!id || bytes == 0 || bytes > ODYSSEY_CAPTURE_MAX_RECORD) return;
 	for (i = 0; i < RGXMKIF_NUM_RTDATAS; i++) { PMR *p; IMG_DEVMEM_OFFSET_T o; const IMG_CHAR *r; RGX_KM_HW_RT_DATASET *s = sets[i];
 		s->ui64OdysseyCaptureId=id; s->ui32OdysseyRT=i; s->sOdysseyDevVAddr=vas[i]; s->ui32OdysseyRgnHeaderSize=bytes; s->ui32OdysseyTEMTILE1=t1; s->ui32OdysseyTEMTILE2=t2; s->ui32OdysseyTEScreen=screen; s->ui32OdysseyISPMtileSize=isp;
 		if (DevmemIntDiagAcquirePMR(vas[i], bytes, &p, &o, &r) == PVRSRV_OK) { s->psOdysseyPMR=p; s->uiOdysseyPMROffset=o; }
@@ -5324,7 +5355,17 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 		{
 			IMG_UINT64 ui64KickId = atomic64_inc_return(&g_ui64OdysseyId);
 			IMG_UINT32 ui32Bytes = psKMHWRTDataSet->ui32OdysseyRgnHeaderSize;
-			if (atomic64_add_return(ui32Bytes, &g_ui64OdysseyBytes) <= ODYSSEY_CAPTURE_BOOT_BUDGET)
+			if (ui32Bytes == 0 || ui32Bytes > ODYSSEY_CAPTURE_MAX_RECORD)
+			{
+				_OdysseyError(ui64KickId, psKMHWRTDataSet->ui32OdysseyRT,
+					psKMHWRTDataSet->sOdysseyDevVAddr, ui32Bytes,
+					psKMHWRTDataSet->ui32OdysseyTEMTILE1,
+					psKMHWRTDataSet->ui32OdysseyTEMTILE2,
+					psKMHWRTDataSet->ui32OdysseyTEScreen,
+					psKMHWRTDataSet->ui32OdysseyISPMtileSize,
+					"length-out-of-range");
+			}
+			else if (atomic64_add_return(ui32Bytes, &g_ui64OdysseyBytes) <= ODYSSEY_CAPTURE_BOOT_BUDGET)
 				_OdysseyDump(psKMHWRTDataSet->psOdysseyPMR,
 				psKMHWRTDataSet->uiOdysseyPMROffset, ui64KickId,
 				psKMHWRTDataSet->ui32OdysseyRT,

@@ -67,6 +67,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/overflow.h>
+#define ODYSSEY_CAPTURE_MAX_RECORD (64U * 1024U)
+extern bool g_bOdysseyCapture;
 static LIST_HEAD(g_sOdysseyMappings);
 static DEFINE_MUTEX(g_sOdysseyMappingsLock);
 PVRSRV_ERROR DevmemIntDiagAcquirePMR(IMG_DEV_VIRTADDR sDevVAddr,
@@ -171,7 +173,8 @@ PVRSRV_ERROR DevmemIntDiagAcquirePMR(IMG_DEV_VIRTADDR sDevVAddr,
 
 	*ppsPMR = NULL;
 	*ppszReason = "unmapped";
-	if (uiSize == 0 || check_add_overflow(sDevVAddr.uiAddr, (IMG_UINT64)uiSize, &uiEnd))
+	if (uiSize == 0 || uiSize > ODYSSEY_CAPTURE_MAX_RECORD ||
+		check_add_overflow(sDevVAddr.uiAddr, (IMG_UINT64)uiSize, &uiEnd))
 	{
 		*ppszReason = "range-overflow";
 		return PVRSRV_ERROR_INVALID_PARAMS;
@@ -991,10 +994,16 @@ DevmemIntMapPMR(DEVMEMINT_HEAP *psDevmemHeap,
 
 #if defined(PF_ODYSSEY_CAPTURE)
 	INIT_LIST_HEAD(&psMapping->sOdysseyNode);
-	psMapping->uiOdysseyPID = OSGetCurrentClientProcessIDKM();
-	mutex_lock(&g_sOdysseyMappingsLock);
-	list_add_tail(&psMapping->sOdysseyNode, &g_sOdysseyMappings);
-	mutex_unlock(&g_sOdysseyMappingsLock);
+	if (g_bOdysseyCapture)
+	{
+		/* DevmemIntMapPMR has no connection argument in this DDK. Scope the
+		 * diagnostic lookup to the calling client PID and reject ambiguous
+		 * address ranges rather than widening the production map API. */
+		psMapping->uiOdysseyPID = OSGetCurrentClientProcessIDKM();
+		mutex_lock(&g_sOdysseyMappingsLock);
+		list_add_tail(&psMapping->sOdysseyNode, &g_sOdysseyMappings);
+		mutex_unlock(&g_sOdysseyMappingsLock);
+	}
 #endif
 
 	*ppsMappingPtr = psMapping;
@@ -1035,9 +1044,12 @@ DevmemIntUnmapPMR(DEVMEMINT_MAPPING *psMapping)
 	IMG_BOOL bIsSparse = IMG_FALSE;
 
 #if defined(PF_ODYSSEY_CAPTURE)
-	mutex_lock(&g_sOdysseyMappingsLock);
-	list_del_init(&psMapping->sOdysseyNode);
-	mutex_unlock(&g_sOdysseyMappingsLock);
+	if (!list_empty(&psMapping->sOdysseyNode))
+	{
+		mutex_lock(&g_sOdysseyMappingsLock);
+		list_del_init(&psMapping->sOdysseyNode);
+		mutex_unlock(&g_sOdysseyMappingsLock);
+	}
 #endif
 
 	ui32NumDevPages = psMapping->uiNumPages;
