@@ -116,6 +116,9 @@ PVRSRVBridgeRGXCreateHWRTDataSet(IMG_UINT32 ui32DispatchTableEntry,
 	IMG_UINT32 ui32NextOffset = 0;
 	IMG_BYTE *pArrayArgsBuffer = NULL;
 	IMG_BOOL bHaveEnoughSpace = IMG_FALSE;
+#if defined(PF_ODYSSEY_CAPTURE)
+	IMG_UINT64 ui64OdysseyCaptureId = 0;
+#endif
 
 	IMG_UINT32 ui32BufferSize = 0;
 	IMG_UINT64 ui64BufferSize =
@@ -348,6 +351,17 @@ PVRSRVBridgeRGXCreateHWRTDataSet(IMG_UINT32 ui32DispatchTableEntry,
 	/* Release now we have looked up handles. */
 	UnlockHandle(psConnection->psHandleBase);
 
+#if defined(PF_ODYSSEY_CAPTURE)
+	/* PF generator pin: keep this call immediately before RGXCreateHWRTDataSet.
+	 * The bridge generator has no custom-call schema in this DDK release. */
+	RGXOdysseyCaptureCreate(psConnection, sRgnHeaderDevVAddrInt,
+		psRGXCreateHWRTDataSetIN->ui32RgnHeaderSize,
+		psRGXCreateHWRTDataSetIN->ui32TEMTILE1,
+		psRGXCreateHWRTDataSetIN->ui32TEMTILE2,
+		psRGXCreateHWRTDataSetIN->ui32TEScreen,
+		psRGXCreateHWRTDataSetIN->ui32ISPMtileSize, &ui64OdysseyCaptureId);
+#endif
+
 	psRGXCreateHWRTDataSetOUT->eError =
 	    RGXCreateHWRTDataSet(psConnection, OSGetDevNode(psConnection),
 				 sVHeapTableDevVAddrInt,
@@ -381,6 +395,14 @@ PVRSRVBridgeRGXCreateHWRTDataSet(IMG_UINT32 ui32DispatchTableEntry,
 	{
 		goto RGXCreateHWRTDataSet_exit;
 	}
+#if defined(PF_ODYSSEY_CAPTURE)
+	RGXOdysseyCaptureRetain(psKmHwRTDataSetInt, sRgnHeaderDevVAddrInt,
+		psRGXCreateHWRTDataSetIN->ui32RgnHeaderSize,
+		psRGXCreateHWRTDataSetIN->ui32TEMTILE1,
+		psRGXCreateHWRTDataSetIN->ui32TEMTILE2,
+		psRGXCreateHWRTDataSetIN->ui32TEScreen,
+		psRGXCreateHWRTDataSetIN->ui32ISPMtileSize, ui64OdysseyCaptureId);
+#endif
 
 	/* Lock over handle creation. */
 	LockHandle(psConnection->psHandleBase);
