@@ -144,6 +144,11 @@ ifeq ($(PVR_SYSTEM),sunxi_a133)
    -I$(DDK_SRC)/include
   # Functional CFLAGS from pvr-buildopts.mk (code-path selection, not bitmask)
   ccflags-y += $(PVR_KM_CFLAGS)
+  # Optional clean-room render-region capture instrumentation. Keep the
+  # production-compatible build unchanged unless explicitly requested.
+  ifeq ($(ODYSSEY_CAPTURE),1)
+    ccflags-y += -DPF_ODYSSEY_CAPTURE
+  endif
 else
   ccflags-y += \
    -include $(srctree)/drivers/gpu/drm/img/kernel_config_compatibility.h \
