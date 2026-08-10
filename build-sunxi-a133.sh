@@ -7,6 +7,7 @@
 #
 # Environment variables:
 #   CROSS_COMPILE     : cross-compiler prefix (default: aarch64-none-linux-gnu-)
+#   ODYSSEY_CAPTURE   : set to 1 to compile PF-CAPTURE support (default: off)
 #   EXTRA_PVR_KM_CFLAGS: additional module CFLAGS (default: empty)
 #   PVR_BUILDOPTS_MK  : path to pvr-buildopts.mk (default: auto-detected from
 #                        ../image/build/pvr-buildopts.mk or /work/src/image/build/)
@@ -45,6 +46,7 @@ echo "=== Building pvrsrvkm.ko for sunxi_a133 ==="
 echo "  DDK source:    $SCRIPT_DIR"
 echo "  Kernel:        $KERNELDIR"
 echo "  Cross:         $CROSS_COMPILE"
+echo "  Odyssey capture: ${ODYSSEY_CAPTURE:-0}"
 echo "  Extra CFLAGS:  ${EXTRA_PVR_KM_CFLAGS:-}"
 echo "  Build-opts mk: ${PVR_BUILDOPTS_MK:-<auto-detect via Makefile>}"
 echo ""
@@ -54,6 +56,7 @@ make -C "$KERNELDIR" \
     M="$SCRIPT_DIR" \
     ARCH=arm64 \
     CROSS_COMPILE="$CROSS_COMPILE" \
+    ODYSSEY_CAPTURE="${ODYSSEY_CAPTURE:-0}" \
     EXTRA_PVR_KM_CFLAGS="${EXTRA_PVR_KM_CFLAGS:-}" \
     CONFIG_DRM_IMG_ROGUE=m \
     PVR_SYSTEM=sunxi_a133 \
