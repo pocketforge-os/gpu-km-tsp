@@ -93,13 +93,27 @@ static inline int get_clks_wrap(struct device *dev)
 		return -1;
 	}
 
-	/* Bus clock (dts clock-names "clk_bus", index 2) + RST_BUS_GPU reset —
-	 * gold-reference parity (kernel-sunxi-6.x rgx_sunxi glue). The vendor
-	 * 4.9 chain left the GPU bus clock running and the reset deasserted
-	 * from firmware, so this vendor glue never took them; mainline gates
-	 * unused clocks (clk_disable_unused) and does not deassert the reset,
-	 * leaving the whole GPU register block dead — observed live as
-	 * CORE_ID reads 0 (tsp-mc9m.9 rounds 2-3). */
+#ifdef CONFIG_ARCH_SUN50IW10
+	/* Vendor 4.9 (kernel-sunxi-4.9): the GPU bus clock and reset are ABSENT from the
+	 * DT (boot firmware leaves them live). Tolerate genuine ABSENCE as best-effort;
+	 * do NOT mask any other, real acquisition error. */
+	sunxi_data->clks.bus = of_clk_get(dev->of_node, 2);
+	if (IS_ERR(sunxi_data->clks.bus)) {
+		if (PTR_ERR(sunxi_data->clks.bus) != -ENOENT) {
+			dev_err(dev, "failed to get GPU bus clock");
+			return -1;                 /* real error — fail, don't mask */
+		}
+		sunxi_data->clks.bus = NULL;       /* absent on 4.9 — best-effort */
+	}
+
+	sunxi_data->clks.reset = devm_reset_control_get_optional(dev, NULL);
+	if (IS_ERR(sunxi_data->clks.reset)) {
+		dev_err(dev, "failed to get GPU reset handle");
+		return -1;                         /* _optional returns NULL for absent; any err is real */
+	}
+#else
+	/* Mainline (kernel-sunxi-6.x): REQUIRED — gold-reference parity (tsp-mc9m.9).
+	 * BYTE-IDENTICAL to main's current code. */
 	sunxi_data->clks.bus = of_clk_get(dev->of_node, 2);
 	if (IS_ERR_OR_NULL(sunxi_data->clks.bus)) {
 		dev_err(dev, "failed to get GPU bus clock");
@@ -111,6 +125,7 @@ static inline int get_clks_wrap(struct device *dev)
 		dev_err(dev, "failed to get GPU reset handle");
 		return -1;
 	}
+#endif
 #endif /* defined(CONFIG_OF) */
 
 	return 0;
