@@ -158,8 +158,13 @@ PVRSRV_ERROR SysDevInit(void *pvOSDevice, PVRSRV_DEVICE_CONFIG **ppsDevConfig)
 	if (gsDevices[0].pvOSDevice)
 		return PVRSRV_ERROR_INVALID_DEVICE;
 
-	if (sunxi_platform_init(dev))
-		return PVRSRV_ERROR_INIT_FAILURE;
+	{
+		int err = sunxi_platform_init(dev);
+
+		if (err)
+			return err == -EPROBE_DEFER ? PVRSRV_ERROR_PROBE_DEFER
+						    : PVRSRV_ERROR_INIT_FAILURE;
+	}
 
 	sunxi_data = (struct sunxi_platform *)dev->platform_data;
 

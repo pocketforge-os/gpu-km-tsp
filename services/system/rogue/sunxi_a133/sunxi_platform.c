@@ -99,12 +99,19 @@ static inline int get_clks_wrap(struct device *dev)
 	 * node has never declared a 3rd (bus) clock or a `resets` property, and the
 	 * vendor clk-sun50iw10 table defines no GPU bus gate. Treat both as best-effort. */
 	sunxi_data->clks.bus = of_clk_get(dev->of_node, 2);
-	if (IS_ERR_OR_NULL(sunxi_data->clks.bus))
+	if (IS_ERR(sunxi_data->clks.bus)) {
+		if (PTR_ERR(sunxi_data->clks.bus) == -EPROBE_DEFER)
+			return -EPROBE_DEFER; /* provider not ready — retry */
+		/* Absent on the 4.9 vendor DT (no 3rd clock) — best-effort. */
 		sunxi_data->clks.bus = NULL;
+	}
 
 	sunxi_data->clks.reset = devm_reset_control_get_optional(dev, NULL);
-	if (IS_ERR(sunxi_data->clks.reset))
+	if (IS_ERR(sunxi_data->clks.reset)) {
+		if (PTR_ERR(sunxi_data->clks.reset) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
 		sunxi_data->clks.reset = NULL;
+	}
 #else
 	/* Mainline (kernel-sunxi-6.x): REQUIRED — gold-reference parity. Mainline gates
 	 * unused clocks and does not deassert resets by default (tsp-mc9m.9 rounds 2-3,
@@ -740,8 +747,8 @@ int sunxi_platform_init(struct device *dev)
 	if (!IS_ERR_OR_NULL(sunxi_data->regula))
 		volt_val = regulator_get_voltage(sunxi_data->regula);
 
-	if (get_clks_wrap(dev)) {
-		err = -1;
+	err = get_clks_wrap(dev);
+	if (err) {
 		goto err_free;
 	}
 
