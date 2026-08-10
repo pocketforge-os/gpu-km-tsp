@@ -282,6 +282,41 @@ void PVRSRVReleasePrintf(const IMG_CHAR *pszFormat, ...)
 	va_end(vaArgs);
 }
 
+#if defined(PF_ODYSSEY_CAPTURE)
+/*
+ * A capture drain must keep every line under one lock.  Keeping IRQs disabled
+ * for the same interval also prevents a local interrupt-side PVR_LOG from
+ * entering the release-print path between capture lines.
+ */
+void PVRSRVReleasePrintfLock(unsigned long *pulLockFlags)
+{
+	spin_lock_irqsave(&gsDebugLock, *pulLockFlags);
+}
+
+void PVRSRVReleasePrintfLocked(const IMG_CHAR *pszFormat, ...)
+{
+	va_list vaArgs;
+	IMG_CHAR *pszBuf = gszBuffer;
+	IMG_UINT32 ui32BufSiz = sizeof(gszBuffer);
+	IMG_INT32 result;
+
+	va_start(vaArgs, pszFormat);
+	result = snprintf(pszBuf, (ui32BufSiz - 2), "PVR_K:  %u: ", current->pid);
+	PVR_ASSERT(result > 0);
+	ui32BufSiz -= result;
+	if (VBAppend(pszBuf, ui32BufSiz, pszFormat, vaArgs))
+		printk(KERN_INFO "%s (truncated)\n", pszBuf);
+	else
+		printk(KERN_INFO "%s\n", pszBuf);
+	va_end(vaArgs);
+}
+
+void PVRSRVReleasePrintfUnlock(unsigned long ulLockFlags)
+{
+	spin_unlock_irqrestore(&gsDebugLock, ulLockFlags);
+}
+#endif
+
 #if defined(PVRSRV_NEED_PVR_TRACE)
 
 /*************************************************************************/ /*!
