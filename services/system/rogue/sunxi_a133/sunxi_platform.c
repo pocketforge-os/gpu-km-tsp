@@ -93,13 +93,22 @@ static inline int get_clks_wrap(struct device *dev)
 		return -1;
 	}
 
-	/* Bus clock (dts clock-names "clk_bus", index 2) + RST_BUS_GPU reset —
-	 * gold-reference parity (kernel-sunxi-6.x rgx_sunxi glue). The vendor
-	 * 4.9 chain left the GPU bus clock running and the reset deasserted
-	 * from firmware, so this vendor glue never took them; mainline gates
-	 * unused clocks (clk_disable_unused) and does not deassert the reset,
-	 * leaving the whole GPU register block dead — observed live as
-	 * CORE_ID reads 0 (tsp-mc9m.9 rounds 2-3). */
+#ifdef CONFIG_ARCH_SUN50IW10
+	/* Vendor 4.9 (kernel-sunxi-4.9): boot firmware leaves the GPU bus clock
+	 * running and RST_BUS_GPU deasserted; pocketforge_tsp.dts's gpu@0x01800000
+	 * node has never declared a 3rd (bus) clock or a `resets` property, and the
+	 * vendor clk-sun50iw10 table defines no GPU bus gate. Treat both as best-effort. */
+	sunxi_data->clks.bus = of_clk_get(dev->of_node, 2);
+	if (IS_ERR_OR_NULL(sunxi_data->clks.bus))
+		sunxi_data->clks.bus = NULL;
+
+	sunxi_data->clks.reset = devm_reset_control_get_optional(dev, NULL);
+	if (IS_ERR(sunxi_data->clks.reset))
+		sunxi_data->clks.reset = NULL;
+#else
+	/* Mainline (kernel-sunxi-6.x): REQUIRED — gold-reference parity. Mainline gates
+	 * unused clocks and does not deassert resets by default (tsp-mc9m.9 rounds 2-3,
+	 * CORE_ID read 0 without this). KEEP THIS BRANCH BYTE-IDENTICAL to today's code. */
 	sunxi_data->clks.bus = of_clk_get(dev->of_node, 2);
 	if (IS_ERR_OR_NULL(sunxi_data->clks.bus)) {
 		dev_err(dev, "failed to get GPU bus clock");
@@ -111,6 +120,7 @@ static inline int get_clks_wrap(struct device *dev)
 		dev_err(dev, "failed to get GPU reset handle");
 		return -1;
 	}
+#endif
 #endif /* defined(CONFIG_OF) */
 
 	return 0;
