@@ -663,6 +663,12 @@ IMG_EXPORT void IMG_CALLCONV PVRSRVDebugPrintfDumpCCB(void);
 @Return         None
 */ /**************************************************************************/
 void IMG_CALLCONV PVRSRVReleasePrintf(const IMG_CHAR *pszFormat, ...) __printf(1, 2);
+
+#if defined(PF_ODYSSEY_CAPTURE)
+void PVRSRVReleasePrintfLock(unsigned long *pulLockFlags);
+void PVRSRVReleasePrintfLocked(const IMG_CHAR *pszFormat, ...) __printf(1, 2);
+void PVRSRVReleasePrintfUnlock(unsigned long ulLockFlags);
+#endif
 #endif
 
 /* PVR_TRACE() handling */

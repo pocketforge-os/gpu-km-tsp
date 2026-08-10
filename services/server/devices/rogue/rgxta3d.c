@@ -78,6 +78,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <crypto/hash.h>
 #include <linux/atomic.h>
 #include <linux/moduleparam.h>
+#include <linux/mutex.h>
 
 #define ODYSSEY_CAPTURE_MAX_RECORD (64U * 1024U)
 #define ODYSSEY_CAPTURE_BOOT_BUDGET (1024U * 1024U)
@@ -89,6 +90,77 @@ module_param_named(odyssey_capture, g_bOdysseyCapture, bool, 0600);
 MODULE_PARM_DESC(odyssey_capture, "Enable bounded ODYSSEY region-header capture");
 static atomic64_t g_ui64OdysseyId = ATOMIC64_INIT(0);
 static atomic64_t g_ui64OdysseyBytes = ATOMIC64_INIT(0);
+
+/* One create contributes RGXMKIF_NUM_RTDATAS records and one first-kick record. */
+#define ODYSSEY_CAPTURE_RECORD_CAP (RGXMKIF_NUM_RTDATAS + 1U)
+#define ODYSSEY_CAPTURE_META_MAX 512U
+static DEFINE_MUTEX(g_sOdysseyCaptureLock);
+static IMG_CHAR *g_apszOdysseyRecords[ODYSSEY_CAPTURE_RECORD_CAP];
+static IMG_UINT32 g_ui32OdysseyRecordCount;
+static IMG_UINT32 g_ui32OdysseyDropped;
+
+static void _OdysseyBufferRecord(IMG_CHAR *record)
+{
+	IMG_CHAR *old = NULL;
+
+	mutex_lock(&g_sOdysseyCaptureLock);
+	if (g_ui32OdysseyRecordCount == ODYSSEY_CAPTURE_RECORD_CAP)
+	{
+		old = g_apszOdysseyRecords[0];
+		memmove(&g_apszOdysseyRecords[0], &g_apszOdysseyRecords[1],
+			(ODYSSEY_CAPTURE_RECORD_CAP - 1U) * sizeof(record));
+		g_ui32OdysseyRecordCount--;
+		g_ui32OdysseyDropped++;
+	}
+	g_apszOdysseyRecords[g_ui32OdysseyRecordCount++] = record;
+	mutex_unlock(&g_sOdysseyCaptureLock);
+	if (old)
+		OSFreeMem(old);
+}
+
+static int _OdysseyCaptureDumpSet(const char *val, const struct kernel_param *kp)
+{
+	unsigned long flags = 0;
+	IMG_UINT32 i;
+
+	PVR_UNREFERENCED_PARAMETER(val);
+	PVR_UNREFERENCED_PARAMETER(kp);
+	mutex_lock(&g_sOdysseyCaptureLock);
+	PVRSRVReleasePrintfLock(&flags);
+	if (g_ui32OdysseyDropped)
+		PVRSRVReleasePrintfLocked("PF-CAPTURE transport-overflow dropped=%u",
+			g_ui32OdysseyDropped);
+	for (i = 0; i < g_ui32OdysseyRecordCount; i++)
+	{
+		IMG_CHAR *line = g_apszOdysseyRecords[i];
+		IMG_CHAR *next;
+
+		while (line && *line)
+		{
+			next = strchr(line, '\n');
+			if (next)
+				*next++ = '\0';
+			PVRSRVReleasePrintfLocked("%s", line);
+			line = next;
+		}
+	}
+	PVRSRVReleasePrintfUnlock(flags);
+	for (i = 0; i < g_ui32OdysseyRecordCount; i++)
+	{
+		OSFreeMem(g_apszOdysseyRecords[i]);
+		g_apszOdysseyRecords[i] = NULL;
+	}
+	g_ui32OdysseyRecordCount = 0;
+	g_ui32OdysseyDropped = 0;
+	mutex_unlock(&g_sOdysseyCaptureLock);
+	return 0;
+}
+
+static const struct kernel_param_ops g_sOdysseyCaptureDumpOps = {
+	.set = _OdysseyCaptureDumpSet,
+};
+module_param_cb(odyssey_capture_dump, &g_sOdysseyCaptureDumpOps, NULL, 0200);
+MODULE_PARM_DESC(odyssey_capture_dump, "Write to drain buffered ODYSSEY captures");
 
 static IMG_BOOL _OdysseyBase64Encode(const IMG_UINT8 *src, IMG_UINT32 src_len,
 		IMG_CHAR *dst, IMG_UINT32 dst_size, IMG_UINT32 *encoded_len)
@@ -124,11 +196,21 @@ static void _OdysseyError(IMG_UINT64 id, IMG_UINT32 rt, IMG_DEV_VIRTADDR va,
 		IMG_UINT32 bytes, IMG_UINT32 t1, IMG_UINT32 t2, IMG_UINT32 screen,
 		IMG_UINT32 isp, const IMG_CHAR *reason)
 {
-	PVR_LOG(("<<<PF-CAPTURE v=1 kind=odyssey-rgn id=%llu rt=%u devva=0x%llx bytes=%u te_mtile1=0x%x te_mtile2=0x%x te_screen=0x%x isp_mtile_size=0x%x status=error reason=%s>>>",
+	IMG_CHAR *record = OSAllocMem(ODYSSEY_CAPTURE_META_MAX);
+
+	if (!record)
+	{
+		mutex_lock(&g_sOdysseyCaptureLock);
+		g_ui32OdysseyDropped++;
+		mutex_unlock(&g_sOdysseyCaptureLock);
+		return;
+	}
+	OSSNPrintf(record, ODYSSEY_CAPTURE_META_MAX,
+		"<<<PF-CAPTURE v=1 kind=odyssey-rgn id=%llu rt=%u devva=0x%llx bytes=%u te_mtile1=0x%x te_mtile2=0x%x te_screen=0x%x isp_mtile_size=0x%x status=error reason=%s>>>\n"
+		"<<<PF-CAPTURE-END id=%llu sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855>>>",
 		(unsigned long long)id, rt, (unsigned long long)va.uiAddr, bytes,
-		t1, t2, screen, isp, reason));
-	PVR_LOG(("<<<PF-CAPTURE-END id=%llu sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855>>>",
-		(unsigned long long)id));
+		t1, t2, screen, isp, reason, (unsigned long long)id);
+	_OdysseyBufferRecord(record);
 }
 
 static void _OdysseyDump(PMR *pmr, IMG_DEVMEM_OFFSET_T off, IMG_UINT64 id,
@@ -142,7 +224,7 @@ static void _OdysseyDump(PMR *pmr, IMG_DEVMEM_OFFSET_T off, IMG_UINT64 id,
 	struct crypto_shash *tfm;
 	struct shash_desc *desc;
 	IMG_UINT8 digest[32];
-	IMG_CHAR hex[65], *b64;
+	IMG_CHAR hex[65], *b64, *record, *cursor;
 	IMG_UINT32 i, encoded;
 
 	err = PMRAcquireKernelMappingData(pmr, off, bytes, &addr, &mapped, &priv);
@@ -160,9 +242,17 @@ static void _OdysseyDump(PMR *pmr, IMG_DEVMEM_OFFSET_T off, IMG_UINT64 id,
 	PMRReleaseKernelMappingData(pmr, priv);
 	if (err != PVRSRV_OK) { OSFreeMem(b64); OSFreeMem(desc); crypto_free_shash(tfm); _OdysseyError(id, rt, va, bytes, t1, t2, screen, isp, "sha256-failed"); return; }
 	for (i = 0; i < 32; i++) OSSNPrintf(&hex[i * 2], 3, "%02x", digest[i]);
-	PVR_LOG(("<<<PF-CAPTURE v=1 kind=odyssey-rgn id=%llu rt=%u devva=0x%llx bytes=%u te_mtile1=0x%x te_mtile2=0x%x te_screen=0x%x isp_mtile_size=0x%x>>>", (unsigned long long)id, rt, (unsigned long long)va.uiAddr, bytes, t1, t2, screen, isp));
-	for (i = 0; i < encoded; i += 76) PVR_LOG(("%.*s", (int)MIN(76U, encoded - i), b64 + i));
-	PVR_LOG(("<<<PF-CAPTURE-END id=%llu sha256=%s>>>", (unsigned long long)id, hex));
+	record = OSAllocMem(encoded + (encoded / 76U) + ODYSSEY_CAPTURE_META_MAX);
+	if (!record) { OSFreeMem(b64); OSFreeMem(desc); crypto_free_shash(tfm); _OdysseyError(id, rt, va, bytes, t1, t2, screen, isp, "out-of-memory"); return; }
+	cursor = record;
+	cursor += OSSNPrintf(cursor, ODYSSEY_CAPTURE_META_MAX,
+		"<<<PF-CAPTURE v=1 kind=odyssey-rgn id=%llu rt=%u devva=0x%llx bytes=%u te_mtile1=0x%x te_mtile2=0x%x te_screen=0x%x isp_mtile_size=0x%x>>>\n",
+		(unsigned long long)id, rt, (unsigned long long)va.uiAddr, bytes, t1, t2, screen, isp);
+	for (i = 0; i < encoded; i += 76)
+		cursor += OSSNPrintf(cursor, 78, "%.*s\n", (int)MIN(76U, encoded - i), b64 + i);
+	OSSNPrintf(cursor, 128, "<<<PF-CAPTURE-END id=%llu sha256=%s>>>",
+		(unsigned long long)id, hex);
+	_OdysseyBufferRecord(record);
 	OSFreeMem(b64); OSFreeMem(desc); crypto_free_shash(tfm);
 }
 
