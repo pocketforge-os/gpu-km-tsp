@@ -3,7 +3,7 @@
 This repository contains the PowerVR Rogue DDK 1.19 kernel module (KM)
 source, extracted from a publicly available Linux kernel fork. PocketForge
 maintains this fork to build `pvrsrvkm.ko` and `dc_sunxi.ko` from source
-against the PocketForge-owned kernel (`pocketforge-os/kernel-tsp`).
+against the PocketForge-owned kernel (`pocketforge-os/kernel-sunxi-4.9` at `device/a133`).
 
 ## Upstream source
 

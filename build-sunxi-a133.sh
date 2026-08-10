@@ -1,9 +1,9 @@
 #!/bin/bash
 # Build pvrsrvkm.ko for sunxi_a133 (TrimUI Smart Pro, GE8300 BVNC 22.102.54.38)
-# against the kernel-tsp headers.
+# against the kernel-sunxi-4.9 headers.
 #
 # Usage: ./build-sunxi-a133.sh [KERNELDIR]
-#   KERNELDIR: path to a configured kernel-tsp tree (default: ../kernel-tsp)
+#   KERNELDIR: path to a configured kernel-sunxi-4.9 tree (default: ../kernel-sunxi-4.9)
 #
 # Environment variables:
 #   CROSS_COMPILE     : cross-compiler prefix (default: aarch64-none-linux-gnu-)
@@ -16,13 +16,13 @@
 #   1. Swapping PVR_SYSTEM to sunxi_a133
 #   2. Swapping BVNC to 22.102.54.38
 #   3. Using our sunxi_a133 Kbuild.mk
-#   4. Building as external kernel module against kernel-tsp
+#   4. Building as external kernel module against kernel-sunxi-4.9
 #   5. Including pvr-buildopts.mk for vendor-matching CFLAGS + build-options overrides
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-KERNELDIR="${1:-$(cd "$SCRIPT_DIR/../kernel-tsp" && pwd)}"
+KERNELDIR="${1:-$(cd "$SCRIPT_DIR/../kernel-sunxi-4.9" && pwd)}"
 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-none-linux-gnu-}"
 
 # Auto-detect pvr-buildopts.mk if not explicitly set
