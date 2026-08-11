@@ -91,8 +91,12 @@ MODULE_PARM_DESC(odyssey_capture, "Enable bounded ODYSSEY region-header capture"
 static atomic64_t g_ui64OdysseyId = ATOMIC64_INIT(0);
 static atomic64_t g_ui64OdysseyBytes = ATOMIC64_INIT(0);
 
-/* One create contributes RGXMKIF_NUM_RTDATAS records and one first-kick record. */
-#define ODYSSEY_CAPTURE_RECORD_CAP (RGXMKIF_NUM_RTDATAS + 1U)
+/*
+ * One render contributes up to RGXMKIF_NUM_RTDATAS create-time records (one
+ * per RTData slot) plus up to RGXMKIF_NUM_RTDATAS first-kick records (one per
+ * independently latched RTDataSet), for up to 2 * RGXMKIF_NUM_RTDATAS records.
+ */
+#define ODYSSEY_CAPTURE_RECORD_CAP (2U * RGXMKIF_NUM_RTDATAS)
 #define ODYSSEY_CAPTURE_META_MAX 512U
 static DEFINE_MUTEX(g_sOdysseyCaptureLock);
 static IMG_CHAR *g_apszOdysseyRecords[ODYSSEY_CAPTURE_RECORD_CAP];
@@ -107,6 +111,9 @@ static void _OdysseyBufferRecord(IMG_CHAR *record)
 	if (g_ui32OdysseyRecordCount == ODYSSEY_CAPTURE_RECORD_CAP)
 	{
 		old = g_apszOdysseyRecords[0];
+		PVR_DPF((PVR_DBG_WARNING,
+			"PF-ODYSSEY: capture ring overflow — evicting oldest record (cap=%u); increase ODYSSEY_CAPTURE_RECORD_CAP",
+			(unsigned)ODYSSEY_CAPTURE_RECORD_CAP));
 		memmove(&g_apszOdysseyRecords[0], &g_apszOdysseyRecords[1],
 			(ODYSSEY_CAPTURE_RECORD_CAP - 1U) * sizeof(record));
 		g_ui32OdysseyRecordCount--;
