@@ -218,7 +218,7 @@ static void _OdysseyDump(PMR *pmr, IMG_DEVMEM_OFFSET_T off, IMG_UINT64 id,
 		IMG_UINT32 t1, IMG_UINT32 t2, IMG_UINT32 screen, IMG_UINT32 isp)
 {
 	PVRSRV_ERROR err;
-	void *addr;
+	void *addr, *snapshot;
 	size_t mapped;
 	IMG_HANDLE priv;
 	struct crypto_shash *tfm;
@@ -229,17 +229,21 @@ static void _OdysseyDump(PMR *pmr, IMG_DEVMEM_OFFSET_T off, IMG_UINT64 id,
 
 	err = PMRAcquireKernelMappingData(pmr, off, bytes, &addr, &mapped, &priv);
 	if (err != PVRSRV_OK || mapped < bytes) { _OdysseyError(id, rt, va, bytes, t1, t2, screen, isp, "non-kernel-mappable"); return; }
+	snapshot = OSAllocMem(bytes);
+	if (!snapshot) { PVR_DPF((PVR_DBG_WARNING, "PF-ODYSSEY: skip record id=%llu rt=%u (snapshot alloc failed)", (unsigned long long)id, rt)); PMRReleaseKernelMappingData(pmr, priv); return; }
+	OSDeviceMemCopy(snapshot, addr, bytes);
 	tfm = crypto_alloc_shash("sha256", 0, 0);
-	if (IS_ERR(tfm)) { PMRReleaseKernelMappingData(pmr, priv); _OdysseyError(id, rt, va, bytes, t1, t2, screen, isp, "sha256-unavailable"); return; }
+	if (IS_ERR(tfm)) { OSFreeMem(snapshot); PMRReleaseKernelMappingData(pmr, priv); _OdysseyError(id, rt, va, bytes, t1, t2, screen, isp, "sha256-unavailable"); return; }
 	desc = OSAllocMem(sizeof(*desc) + crypto_shash_descsize(tfm));
 	encoded = ((bytes + 2U) / 3U) * 4U;
 	b64 = OSAllocMem(encoded + 1U);
-	if (!desc || !b64) { if (desc) OSFreeMem(desc); if (b64) OSFreeMem(b64); crypto_free_shash(tfm); PMRReleaseKernelMappingData(pmr, priv); _OdysseyError(id, rt, va, bytes, t1, t2, screen, isp, "out-of-memory"); return; }
+	if (!desc || !b64) { if (desc) OSFreeMem(desc); if (b64) OSFreeMem(b64); crypto_free_shash(tfm); OSFreeMem(snapshot); PMRReleaseKernelMappingData(pmr, priv); _OdysseyError(id, rt, va, bytes, t1, t2, screen, isp, "out-of-memory"); return; }
 	desc->tfm = tfm;
-	err = crypto_shash_digest(desc, addr, bytes, digest) ? PVRSRV_ERROR_INVALID_PARAMS : PVRSRV_OK;
-	if (!_OdysseyBase64Encode(addr, bytes, b64, encoded + 1U, &encoded))
+	err = crypto_shash_digest(desc, snapshot, bytes, digest) ? PVRSRV_ERROR_INVALID_PARAMS : PVRSRV_OK;
+	if (!_OdysseyBase64Encode(snapshot, bytes, b64, encoded + 1U, &encoded))
 		err = PVRSRV_ERROR_INVALID_PARAMS;
 	PMRReleaseKernelMappingData(pmr, priv);
+	OSFreeMem(snapshot);
 	if (err != PVRSRV_OK) { OSFreeMem(b64); OSFreeMem(desc); crypto_free_shash(tfm); _OdysseyError(id, rt, va, bytes, t1, t2, screen, isp, "sha256-failed"); return; }
 	for (i = 0; i < 32; i++) OSSNPrintf(&hex[i * 2], 3, "%02x", digest[i]);
 	record = OSAllocMem(encoded + (encoded / 76U) + ODYSSEY_CAPTURE_META_MAX);
