@@ -396,7 +396,8 @@ PVRSRVBridgeRGXCreateHWRTDataSet(IMG_UINT32 ui32DispatchTableEntry,
 		goto RGXCreateHWRTDataSet_exit;
 	}
 #if defined(PF_ODYSSEY_CAPTURE)
-	RGXOdysseyCaptureRetain(psKmHwRTDataSetInt, sRgnHeaderDevVAddrInt,
+	RGXOdysseyCaptureRetain(psConnection, psKmHwRTDataSetInt,
+		sRgnHeaderDevVAddrInt,
 		psRGXCreateHWRTDataSetIN->ui32RgnHeaderSize,
 		psRGXCreateHWRTDataSetIN->ui32TEMTILE1,
 		psRGXCreateHWRTDataSetIN->ui32TEMTILE2,
