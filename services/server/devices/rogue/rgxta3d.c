@@ -269,6 +269,75 @@ static void _OdysseyDump(PMR *pmr, IMG_DEVMEM_OFFSET_T off, IMG_UINT64 id,
 	OSFreeMem(b64); OSFreeMem(desc); crypto_free_shash(tfm);
 }
 
+static void _OdysseyDumpGeomCmd(IMG_UINT64 ui64Id, const IMG_BYTE *pui8Cmd,
+		IMG_UINT32 ui32Bytes)
+{
+	struct crypto_shash *tfm;
+	struct shash_desc *desc;
+	IMG_UINT8 digest[32];
+	IMG_CHAR hex[65], *b64, *record, *cursor;
+	IMG_UINT32 i, encoded;
+
+	tfm = crypto_alloc_shash("sha256", 0, 0);
+	if (IS_ERR(tfm))
+	{
+		PVR_DPF((PVR_DBG_WARNING,
+			"PF-ODYSSEY: skip geom-cmd record id=%llu (sha256 unavailable)",
+			(unsigned long long)ui64Id));
+		return;
+	}
+	desc = OSAllocMem(sizeof(*desc) + crypto_shash_descsize(tfm));
+	encoded = ((ui32Bytes + 2U) / 3U) * 4U;
+	b64 = OSAllocMem(encoded + 1U);
+	if (!desc || !b64)
+	{
+		if (desc) OSFreeMem(desc);
+		if (b64) OSFreeMem(b64);
+		crypto_free_shash(tfm);
+		PVR_DPF((PVR_DBG_WARNING,
+			"PF-ODYSSEY: skip geom-cmd record id=%llu (out of memory)",
+			(unsigned long long)ui64Id));
+		return;
+	}
+	desc->tfm = tfm;
+	if (crypto_shash_digest(desc, pui8Cmd, ui32Bytes, digest) ||
+		!_OdysseyBase64Encode(pui8Cmd, ui32Bytes, b64, encoded + 1U, &encoded))
+	{
+		OSFreeMem(b64);
+		OSFreeMem(desc);
+		crypto_free_shash(tfm);
+		PVR_DPF((PVR_DBG_WARNING,
+			"PF-ODYSSEY: skip geom-cmd record id=%llu (encoding failed)",
+			(unsigned long long)ui64Id));
+		return;
+	}
+	for (i = 0; i < 32; i++) OSSNPrintf(&hex[i * 2], 3, "%02x", digest[i]);
+	record = OSAllocMem(encoded + (encoded / 76U) + ODYSSEY_CAPTURE_META_MAX);
+	if (!record)
+	{
+		OSFreeMem(b64);
+		OSFreeMem(desc);
+		crypto_free_shash(tfm);
+		PVR_DPF((PVR_DBG_WARNING,
+			"PF-ODYSSEY: skip geom-cmd record id=%llu (out of memory)",
+			(unsigned long long)ui64Id));
+		return;
+	}
+	cursor = record;
+	cursor += OSSNPrintf(cursor, ODYSSEY_CAPTURE_META_MAX,
+		"<<<PF-CAPTURE v=1 kind=odyssey-geomcmd id=%llu bytes=%u>>>\n",
+		(unsigned long long)ui64Id, ui32Bytes);
+	for (i = 0; i < encoded; i += 76)
+		cursor += OSSNPrintf(cursor, 78, "%.*s\n",
+			(int)MIN(76U, encoded - i), b64 + i);
+	OSSNPrintf(cursor, 128, "<<<PF-CAPTURE-END id=%llu sha256=%s>>>",
+		(unsigned long long)ui64Id, hex);
+	_OdysseyBufferRecord(record);
+	OSFreeMem(b64);
+	OSFreeMem(desc);
+	crypto_free_shash(tfm);
+}
+
 static void _OdysseyResolveDump(IMG_UINT64 id, IMG_UINT32 rt, IMG_DEV_VIRTADDR va,
 		IMG_UINT32 bytes, IMG_UINT32 t1, IMG_UINT32 t2, IMG_UINT32 screen, IMG_UINT32 isp)
 {
@@ -5596,6 +5665,7 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 		_OdysseyDumpVCE(psRenderContext->psDeviceNode->pvDevice,
 			psKMHWRTDataSet->sOdysseyVHeapDevVAddr, ui64KickId,
 			psKMHWRTDataSet->ui32OdysseyRT);
+		_OdysseyDumpGeomCmd(ui64KickId, pui8TADMCmd, ui32TACmdSize);
 	}
 #endif
 
