@@ -94,11 +94,11 @@ static atomic64_t g_ui64OdysseyId = ATOMIC64_INIT(0);
 static atomic64_t g_ui64OdysseyBytes = ATOMIC64_INIT(0);
 
 /*
- * One render contributes up to RGXMKIF_NUM_RTDATAS create-time records (one
- * per RTData slot) plus up to RGXMKIF_NUM_RTDATAS first-kick records (one per
- * independently latched RTDataSet), for up to 2 * RGXMKIF_NUM_RTDATAS records.
+ * One render contributes up to RGXMKIF_NUM_RTDATAS records of each capture
+ * kind (region, VCE, and geom command), for up to
+ * 3 * RGXMKIF_NUM_RTDATAS records.
  */
-#define ODYSSEY_CAPTURE_RECORD_CAP (2U * RGXMKIF_NUM_RTDATAS)
+#define ODYSSEY_CAPTURE_RECORD_CAP (3U * RGXMKIF_NUM_RTDATAS)
 #define ODYSSEY_CAPTURE_META_MAX 512U
 static DEFINE_MUTEX(g_sOdysseyCaptureLock);
 static IMG_CHAR *g_apszOdysseyRecords[ODYSSEY_CAPTURE_RECORD_CAP];
