@@ -163,13 +163,12 @@ struct _DEVMEMINT_MAPPING_
 };
 
 #if defined(PF_ODYSSEY_CAPTURE)
-PVRSRV_ERROR DevmemIntDiagAcquirePMR(IMG_DEV_VIRTADDR sDevVAddr,
-		IMG_DEVMEM_SIZE_T uiSize, PMR **ppsPMR,
+PVRSRV_ERROR DevmemIntDiagAcquirePMRForPID(IMG_DEV_VIRTADDR sDevVAddr,
+		IMG_DEVMEM_SIZE_T uiSize, IMG_PID uiPID, PMR **ppsPMR,
 		IMG_DEVMEM_OFFSET_T *puiPMROffset, const IMG_CHAR **ppszReason)
 {
 	DEVMEMINT_MAPPING *psMapping, *psFound = NULL;
 	IMG_UINT64 uiEnd;
-	IMG_PID uiPID = OSGetCurrentClientProcessIDKM();
 
 	*ppsPMR = NULL;
 	*ppszReason = "unmapped";
@@ -220,6 +219,14 @@ PVRSRV_ERROR DevmemIntDiagAcquirePMR(IMG_DEV_VIRTADDR sDevVAddr,
 	}
 	mutex_unlock(&g_sOdysseyMappingsLock);
 	return *ppsPMR != NULL ? PVRSRV_OK : PVRSRV_ERROR_INVALID_PARAMS;
+}
+
+PVRSRV_ERROR DevmemIntDiagAcquirePMR(IMG_DEV_VIRTADDR sDevVAddr,
+		IMG_DEVMEM_SIZE_T uiSize, PMR **ppsPMR,
+		IMG_DEVMEM_OFFSET_T *puiPMROffset, const IMG_CHAR **ppszReason)
+{
+	return DevmemIntDiagAcquirePMRForPID(sDevVAddr, uiSize,
+		OSGetCurrentClientProcessIDKM(), ppsPMR, puiPMROffset, ppszReason);
 }
 #endif
 

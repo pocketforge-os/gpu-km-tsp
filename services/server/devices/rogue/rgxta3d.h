@@ -55,6 +55,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "rgxdebug.h"
 #include "pvr_notifier.h"
 
+#if defined(PF_ODYSSEY_CAPTURE)
+#include <linux/workqueue.h>
+#endif
+
 typedef struct _RGX_SERVER_RENDER_CONTEXT_ RGX_SERVER_RENDER_CONTEXT;
 typedef struct _RGX_PMR_NODE_ RGX_PMR_NODE;
 
@@ -188,7 +192,11 @@ typedef struct _RGX_KM_HW_RT_DATASET_
 	IMG_UINT32 ui32OdysseyTEMTILE1, ui32OdysseyTEMTILE2;
 	IMG_UINT32 ui32OdysseyTEScreen, ui32OdysseyISPMtileSize;
 	IMG_UINT32 ui32OdysseyRT;
+	IMG_PID uiOdysseyPID;
 	IMG_BOOL bOdysseyFirstKickCaptured;
+	struct delayed_work sOdysseyPostGeomWork;
+	IMG_UINT64 ui64OdysseyPostGeomId;
+	IMG_UINT32 ui32OdysseyPostGeomRetries;
 #endif
 
 } RGX_KM_HW_RT_DATASET;
