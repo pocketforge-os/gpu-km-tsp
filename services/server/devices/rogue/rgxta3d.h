@@ -182,6 +182,7 @@ typedef struct _RGX_KM_HW_RT_DATASET_
 	PMR *psOdysseyPMR;
 	IMG_DEVMEM_OFFSET_T uiOdysseyPMROffset;
 	IMG_DEV_VIRTADDR sOdysseyDevVAddr;
+	IMG_DEV_VIRTADDR sOdysseyVHeapDevVAddr;
 	IMG_UINT64 ui64OdysseyCaptureId;
 	IMG_UINT32 ui32OdysseyRgnHeaderSize;
 	IMG_UINT32 ui32OdysseyTEMTILE1, ui32OdysseyTEMTILE2;
