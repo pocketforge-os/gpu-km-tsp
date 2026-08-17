@@ -1606,6 +1606,10 @@ static PVRSRV_ERROR RGXCreateHWRTData_aux(
 		IMG_DEV_VIRTADDR	sRTCDevVAddr,
 		IMG_UINT16			ui16MaxRTs,
 		RGX_HWRTDATA_COMMON_COOKIE	*psHWRTDataCommonCookie,
+#if defined(PF_ODYSSEY_CAPTURE)
+		IMG_UINT64		ui64OdysseyHWRTId,
+		IMG_UINT32		ui32OdysseyRT,
+#endif
 		RGX_KM_HW_RT_DATASET **ppsKMHWRTDataSet) /* per-HWRTData */
 {
 	PVRSRV_ERROR eError;
@@ -1772,6 +1776,20 @@ static PVRSRV_ERROR RGXCreateHWRTData_aux(
 	PDUMPCOMMENT(psDeviceNode, "Dump HWRTData 0x%08X", psKMHWRTDataSet->sHWRTDataFwAddr.ui32Addr);
 	DevmemPDumpLoadMem(psKMHWRTDataSet->psHWRTDataFwMemDesc, 0, sizeof(*psHWRTData), PDUMP_FLAGS_CONTINUOUS);
 #endif
+#if defined(PF_ODYSSEY_CAPTURE)
+	if (g_bOdysseyCapture)
+	{
+		PVR_LOG(("<<<PF-CAPTURE-HWRT-RT v=1 id=%llu rt=%u vheap=0x%llx tail_ptrs=0x%llx pm_mlist=0x%llx macrotile=0x%llx rgn_header=0x%llx rtc=0x%llx freelist0=0x%x>>>",
+			(unsigned long long)ui64OdysseyHWRTId, ui32OdysseyRT,
+			(unsigned long long)psVHeapTableDevVAddr.uiAddr,
+			(unsigned long long)sTailPtrsDevVAddr.uiAddr,
+			(unsigned long long)psPMMListDevVAddr.uiAddr,
+			(unsigned long long)sMacrotileArrayDevVAddr.uiAddr,
+			(unsigned long long)sRgnHeaderDevVAddr.uiAddr,
+			(unsigned long long)sRTCDevVAddr.uiAddr,
+			psHWRTData->apsFreeLists[0].ui32Addr));
+	}
+#endif
 
 	DevmemReleaseCpuVirtAddr(psKMHWRTDataSet->psHWRTDataFwMemDesc);
 	return PVRSRV_OK;
@@ -1889,6 +1907,9 @@ PVRSRV_ERROR RGXCreateHWRTDataSet(CONNECTION_DATA      *psConnection,
 	PVRSRV_ERROR eError;
 	IMG_UINT32 ui32RTDataID;
 	PVRSRV_RGXDEV_INFO		*psDevInfo = psDeviceNode->pvDevice;
+#if defined(PF_ODYSSEY_CAPTURE)
+	IMG_UINT64 ui64OdysseyHWRTId = 0;
+#endif
 
 	RGX_HWRTDATA_COMMON_COOKIE	*psHWRTDataCommonCookie;
 	RGXFWIF_HWRTDATA_COMMON		*psHWRTDataCommon;
@@ -1945,6 +1966,22 @@ PVRSRV_ERROR RGXCreateHWRTDataSet(CONNECTION_DATA      *psConnection,
 	psHWRTDataCommon->ui32ISPMergeScaleY = ui32ISPMergeScaleY;
 	psHWRTDataCommon->uiRgnHeaderSize			= uiRgnHeaderSize;
 	psHWRTDataCommon->ui32ISPMtileSize		= ui32ISPMtileSize;
+#if defined(PF_ODYSSEY_CAPTURE)
+	if (g_bOdysseyCapture)
+	{
+		ui64OdysseyHWRTId = atomic64_inc_return(&g_ui64OdysseyId);
+		PVR_LOG(("<<<PF-CAPTURE-HWRT-COMMON v=1 id=%llu tpc_stride=0x%x tpc_size=0x%x te_screen=0x%x mtile_stride=0x%x rgn_header_size=0x%x isp_mtile_size=0x%x screen_pixel_max=0x%x multi_sample_ctl=0x%llx>>>",
+			(unsigned long long)ui64OdysseyHWRTId,
+			psHWRTDataCommon->ui32TPCStride,
+			psHWRTDataCommon->ui32TPCSize,
+			psHWRTDataCommon->ui32TEScreen,
+			psHWRTDataCommon->ui32MTileStride,
+			psHWRTDataCommon->uiRgnHeaderSize,
+			psHWRTDataCommon->ui32ISPMtileSize,
+			psHWRTDataCommon->ui32ScreenPixelMax,
+			(unsigned long long)psHWRTDataCommon->ui64MultiSampleCtl));
+	}
+#endif
 #if defined(PDUMP)
 	PDUMPCOMMENT(psDeviceNode, "Dump HWRTDataCommon");
 	DevmemPDumpLoadMem(psHWRTDataCommonFwMemDesc, 0, sizeof(*psHWRTDataCommon), PDUMP_FLAGS_CONTINUOUS);
@@ -1973,6 +2010,10 @@ PVRSRV_ERROR RGXCreateHWRTDataSet(CONNECTION_DATA      *psConnection,
 			asRTCDevVAddr[ui32RTDataID % RGXMKIF_NUM_GEOMDATAS],
 			ui16MaxRTs,
 			psHWRTDataCommonCookie,
+#if defined(PF_ODYSSEY_CAPTURE)
+			ui64OdysseyHWRTId,
+			ui32RTDataID,
+#endif
 			&pasKMHWRTDataSet[ui32RTDataID]);
 
 		if (eError != PVRSRV_OK)
