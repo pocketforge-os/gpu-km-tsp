@@ -112,7 +112,7 @@ static atomic64_t g_ui64OdysseyBytes = ATOMIC64_INIT(0);
  */
 #define ODYSSEY_CAPTURE_RECORD_CAP \
 	((ODYSSEY_PB_TILE_CAP + 6U) * RGXMKIF_NUM_RTDATAS)
-#define ODYSSEY_CAPTURE_META_MAX 4096U
+#define ODYSSEY_CAPTURE_META_MAX 1536U
 static DEFINE_MUTEX(g_sOdysseyCaptureLock);
 static IMG_CHAR *g_apszOdysseyRecords[ODYSSEY_CAPTURE_RECORD_CAP];
 static IMG_UINT32 g_ui32OdysseyRecordCount;
