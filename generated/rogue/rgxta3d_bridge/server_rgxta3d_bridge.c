@@ -359,7 +359,8 @@ PVRSRVBridgeRGXCreateHWRTDataSet(IMG_UINT32 ui32DispatchTableEntry,
 		psRGXCreateHWRTDataSetIN->ui32TEMTILE1,
 		psRGXCreateHWRTDataSetIN->ui32TEMTILE2,
 		psRGXCreateHWRTDataSetIN->ui32TEScreen,
-		psRGXCreateHWRTDataSetIN->ui32ISPMtileSize, &ui64OdysseyCaptureId);
+		psRGXCreateHWRTDataSetIN->ui32ISPMtileSize,
+		psRGXCreateHWRTDataSetIN->ui32PPPScreen, &ui64OdysseyCaptureId);
 #endif
 
 	psRGXCreateHWRTDataSetOUT->eError =
@@ -401,7 +402,8 @@ PVRSRVBridgeRGXCreateHWRTDataSet(IMG_UINT32 ui32DispatchTableEntry,
 		psRGXCreateHWRTDataSetIN->ui32TEMTILE1,
 		psRGXCreateHWRTDataSetIN->ui32TEMTILE2,
 		psRGXCreateHWRTDataSetIN->ui32TEScreen,
-		psRGXCreateHWRTDataSetIN->ui32ISPMtileSize, ui64OdysseyCaptureId);
+		psRGXCreateHWRTDataSetIN->ui32ISPMtileSize,
+		psRGXCreateHWRTDataSetIN->ui32PPPScreen, ui64OdysseyCaptureId);
 #endif
 
 	/* Lock over handle creation. */
