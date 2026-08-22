@@ -84,6 +84,21 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #define ODYSSEY_CAPTURE_BOOT_BUDGET (1024U * 1024U)
 /* The Rogue Services VHeap table occupies one device page. */
 #define ODYSSEY_VHEAP_TABLE_BYTES (4U * 1024U)
+
+/* Firmware-programmed ISP/TE registers absent from the generated KM defs. */
+#define RGX_CR_TE_AA                         (0x0C00U)
+#define RGX_CR_TE_MTILE1                     (0x0C08U)
+#define RGX_CR_TE_MTILE2                     (0x0C10U)
+#define RGX_CR_TE_SCREEN                     (0x0C18U)
+#define RGX_CR_TE_MTILE_STRIDE               (0x0C20U)
+#define RGX_CR_ISP_RENDER_ORIGIN             (0x0F10U)
+#define RGX_CR_ISP_MTILE_SIZE                (0x0F18U)
+#define RGX_CR_ISP_MTILE_BASE                (0x0F20U)
+#define RGX_CR_ISP_RGN                       (0x0F28U)
+#define RGX_CR_ISP_AA                        (0x0F30U)
+#define RGX_CR_ISP_ZLSCTL                    (0x0F48U)
+#define RGX_CR_ISP_SCISSOR_BASE              (0x0F80U)
+#define RGX_CR_ISP_SCISSOR_SIZE              (0x0F88U)
 extern PVRSRV_ERROR DevmemIntDiagAcquirePMR(IMG_DEV_VIRTADDR sDevVAddr,
 		IMG_DEVMEM_SIZE_T uiSize, PMR **ppsPMR,
 		IMG_DEVMEM_OFFSET_T *puiPMROffset, const IMG_CHAR **ppszReason);
@@ -92,6 +107,8 @@ module_param_named(odyssey_capture, g_bOdysseyCapture, bool, 0600);
 MODULE_PARM_DESC(odyssey_capture, "Enable bounded ODYSSEY render-state capture");
 static atomic64_t g_ui64OdysseyId = ATOMIC64_INIT(0);
 static atomic64_t g_ui64OdysseyBytes = ATOMIC64_INIT(0);
+static atomic64_t g_ui64Odyssey3DKickOrdinal = ATOMIC64_INIT(0);
+static IMG_BOOL g_bOdysseyLiveISPDumped = IMG_FALSE;
 
 /*
  * One render contributes up to RGXMKIF_NUM_RTDATAS records of each capture
@@ -104,6 +121,47 @@ static DEFINE_MUTEX(g_sOdysseyCaptureLock);
 static IMG_CHAR *g_apszOdysseyRecords[ODYSSEY_CAPTURE_RECORD_CAP];
 static IMG_UINT32 g_ui32OdysseyRecordCount;
 static IMG_UINT32 g_ui32OdysseyDropped;
+
+static void _OdysseyDumpLiveISP(PVRSRV_RGXDEV_INFO *psDevInfo)
+{
+	void __iomem *pvRegs = psDevInfo->pvRegsBaseKM;
+	IMG_UINT32 ui32ISPRender, ui32ISPRenderOrigin, ui32ISPMTileSize;
+	IMG_UINT32 ui32ISPRgn, ui32ISPAA, ui32ISPCtl, ui32ISPScissorSize;
+	IMG_UINT32 ui32TEAA, ui32TEMTile1, ui32TEMTile2, ui32TEScreen;
+	IMG_UINT32 ui32TEMTileStride;
+	IMG_UINT64 ui64ISPMTileBase, ui64ISPZLSCtl, ui64ISPScissorBase;
+
+	if (g_bOdysseyLiveISPDumped)
+		return;
+	g_bOdysseyLiveISPDumped = IMG_TRUE;
+
+	ui32ISPRender = OSReadHWReg32(pvRegs, RGX_CR_ISP_RENDER);
+	ui32ISPRenderOrigin = OSReadHWReg32(pvRegs, RGX_CR_ISP_RENDER_ORIGIN);
+	ui32ISPMTileSize = OSReadHWReg32(pvRegs, RGX_CR_ISP_MTILE_SIZE);
+	ui64ISPMTileBase = OSReadHWReg64(pvRegs, RGX_CR_ISP_MTILE_BASE);
+	ui32ISPRgn = OSReadHWReg32(pvRegs, RGX_CR_ISP_RGN);
+	ui32ISPAA = OSReadHWReg32(pvRegs, RGX_CR_ISP_AA);
+	ui32ISPCtl = OSReadHWReg32(pvRegs, RGX_CR_ISP_CTL);
+	ui64ISPZLSCtl = OSReadHWReg64(pvRegs, RGX_CR_ISP_ZLSCTL);
+	ui64ISPScissorBase = OSReadHWReg64(pvRegs, RGX_CR_ISP_SCISSOR_BASE);
+	ui32ISPScissorSize = OSReadHWReg32(pvRegs, RGX_CR_ISP_SCISSOR_SIZE);
+	ui32TEAA = OSReadHWReg32(pvRegs, RGX_CR_TE_AA);
+	ui32TEMTile1 = OSReadHWReg32(pvRegs, RGX_CR_TE_MTILE1);
+	ui32TEMTile2 = OSReadHWReg32(pvRegs, RGX_CR_TE_MTILE2);
+	ui32TEScreen = OSReadHWReg32(pvRegs, RGX_CR_TE_SCREEN);
+	ui32TEMTileStride = OSReadHWReg32(pvRegs, RGX_CR_TE_MTILE_STRIDE);
+
+	PVR_LOG(("PF-LIVEISP-CLOSED2 f08=0x%08x f10=0x%08x f18=0x%08x x=%u y=%u f20=0x%016llx f28=0x%08x f30=0x%08x f38=0x%08x bit27=%u bit28=%u f48=0x%016llx f80=0x%016llx f88=0x%08x c00=0x%08x c08=0x%08x c10=0x%08x c18=0x%08x xmax=%u ymax=%u c20=0x%08x",
+		ui32ISPRender, ui32ISPRenderOrigin, ui32ISPMTileSize,
+		(ui32ISPMTileSize >> 16) & 0x3ffU, ui32ISPMTileSize & 0x3ffU,
+		(unsigned long long)ui64ISPMTileBase, ui32ISPRgn, ui32ISPAA,
+		ui32ISPCtl, (ui32ISPCtl >> 27) & 1U, (ui32ISPCtl >> 28) & 1U,
+		(unsigned long long)ui64ISPZLSCtl,
+		(unsigned long long)ui64ISPScissorBase, ui32ISPScissorSize,
+		ui32TEAA, ui32TEMTile1, ui32TEMTile2, ui32TEScreen,
+		(ui32TEScreen >> 16) & 0x3ffU, ui32TEScreen & 0x3ffU,
+		ui32TEMTileStride));
+}
 
 static void _OdysseyBufferRecord(IMG_CHAR *record)
 {
@@ -5625,8 +5683,11 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 		psKMHWRTDataSet->ui64OdysseyCaptureId)
 	{
 		IMG_UINT64 ui64KickId = atomic64_inc_return(&g_ui64OdysseyId);
+		IMG_UINT64 ui64KickOrdinal = atomic64_inc_return(&g_ui64Odyssey3DKickOrdinal);
 
 		psKMHWRTDataSet->bOdysseyFirstKickCaptured = IMG_TRUE;
+		if (ui64KickOrdinal >= 2U)
+			_OdysseyDumpLiveISP(psRenderContext->psDeviceNode->pvDevice);
 		if (psKMHWRTDataSet->psOdysseyPMR)
 		{
 			IMG_UINT32 ui32Bytes = psKMHWRTDataSet->ui32OdysseyRgnHeaderSize;
