@@ -111,7 +111,7 @@ module_param_named(odyssey_capture, g_bOdysseyCapture, bool, 0600);
 MODULE_PARM_DESC(odyssey_capture, "Enable bounded ODYSSEY render-state capture");
 static atomic64_t g_ui64OdysseyId = ATOMIC64_INIT(0);
 static atomic64_t g_ui64OdysseyBytes = ATOMIC64_INIT(0);
-static atomic_t g_iOdysseyLiveISPDumped = ATOMIC_INIT(0);
+static IMG_BOOL g_bOdysseyLiveISPDumped = IMG_FALSE;
 
 /*
  * One render contributes up to RGXMKIF_NUM_RTDATAS records of each capture
@@ -134,8 +134,9 @@ static void _OdysseyDumpLiveISP(PVRSRV_RGXDEV_INFO *psDevInfo)
 	IMG_UINT32 ui32TEMTileStride;
 	IMG_UINT64 ui64ISPMTileBase, ui64ISPZLSCtl, ui64ISPScissorBase;
 
-	if (atomic_cmpxchg(&g_iOdysseyLiveISPDumped, 0, 1) != 0)
+	if (g_bOdysseyLiveISPDumped)
 		return;
+	g_bOdysseyLiveISPDumped = IMG_TRUE;
 
 	ui32ISPRender = OSReadHWReg32(pvRegs, RGX_CR_ISP_RENDER);
 	ui32ISPRenderOrigin = OSReadHWReg32(pvRegs, RGX_CR_ISP_RENDER_ORIGIN);
