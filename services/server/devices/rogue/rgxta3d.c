@@ -95,10 +95,10 @@ static atomic64_t g_ui64OdysseyBytes = ATOMIC64_INIT(0);
 
 /*
  * One render contributes up to RGXMKIF_NUM_RTDATAS records of each capture
- * kind (region, VCE, and geom command), for up to
- * 3 * RGXMKIF_NUM_RTDATAS records.
+ * kind (region, VCE, geom command, and fragment command), for up to
+ * 4 * RGXMKIF_NUM_RTDATAS records.
  */
-#define ODYSSEY_CAPTURE_RECORD_CAP (3U * RGXMKIF_NUM_RTDATAS)
+#define ODYSSEY_CAPTURE_RECORD_CAP (4U * RGXMKIF_NUM_RTDATAS)
 #define ODYSSEY_CAPTURE_META_MAX 512U
 static DEFINE_MUTEX(g_sOdysseyCaptureLock);
 static IMG_CHAR *g_apszOdysseyRecords[ODYSSEY_CAPTURE_RECORD_CAP];
@@ -334,6 +334,91 @@ static void _OdysseyDumpGeomCmd(IMG_UINT64 ui64Id, const IMG_BYTE *pui8Cmd,
 		(unsigned long long)ui64Id, hex);
 	_OdysseyBufferRecord(record);
 	OSFreeMem(b64);
+	OSFreeMem(desc);
+	crypto_free_shash(tfm);
+}
+
+/*
+ * The KM is multi-BVNC and therefore deliberately only knows the common
+ * TA/3D command prefix, not the single-BVNC RGXFWIF_CMD3D definition used by
+ * UM and FW.  Preserve the complete closed command and the exact offset at
+ * which its s3DRegs block starts so it can be decoded with the matching
+ * closed FWIF headers without guessing open-driver offsets.
+ */
+static void _OdysseyDumpFragCmd(IMG_UINT64 ui64Id, const IMG_BYTE *pui8Cmd,
+		IMG_UINT32 ui32Bytes)
+{
+	struct crypto_shash *tfm;
+	struct shash_desc *desc;
+	IMG_UINT8 digest[32];
+	IMG_CHAR digestHex[65], *record, *cursor;
+	IMG_UINT32 i;
+	const IMG_UINT32 ui32RegsOffset = sizeof(CMDTA3D_SHARED);
+
+	if (!pui8Cmd || ui32Bytes == 0U ||
+		ui32Bytes > RGXFWIF_DM_INDEPENDENT_KICK_CMD_SIZE)
+	{
+		PVR_DPF((PVR_DBG_WARNING,
+			"PF-ODYSSEY: skip frag-cmd record id=%llu (invalid length %u)",
+			(unsigned long long)ui64Id, ui32Bytes));
+		return;
+	}
+
+	tfm = crypto_alloc_shash("sha256", 0, 0);
+	if (IS_ERR(tfm))
+	{
+		PVR_DPF((PVR_DBG_WARNING,
+			"PF-ODYSSEY: skip frag-cmd record id=%llu (sha256 unavailable)",
+			(unsigned long long)ui64Id));
+		return;
+	}
+	desc = OSAllocMem(sizeof(*desc) + crypto_shash_descsize(tfm));
+	if (!desc)
+	{
+		crypto_free_shash(tfm);
+		PVR_DPF((PVR_DBG_WARNING,
+			"PF-ODYSSEY: skip frag-cmd record id=%llu (out of memory)",
+			(unsigned long long)ui64Id));
+		return;
+	}
+	desc->tfm = tfm;
+	if (crypto_shash_digest(desc, pui8Cmd, ui32Bytes, digest))
+	{
+		OSFreeMem(desc);
+		crypto_free_shash(tfm);
+		PVR_DPF((PVR_DBG_WARNING,
+			"PF-ODYSSEY: skip frag-cmd record id=%llu (sha256 failed)",
+			(unsigned long long)ui64Id));
+		return;
+	}
+
+	for (i = 0; i < 32U; i++)
+		OSSNPrintf(&digestHex[i * 2U], 3, "%02x", digest[i]);
+	record = OSAllocMem((ui32Bytes * 2U) + ((ui32Bytes + 31U) / 32U) +
+		ODYSSEY_CAPTURE_META_MAX);
+	if (!record)
+	{
+		OSFreeMem(desc);
+		crypto_free_shash(tfm);
+		PVR_DPF((PVR_DBG_WARNING,
+			"PF-ODYSSEY: skip frag-cmd record id=%llu (out of memory)",
+			(unsigned long long)ui64Id));
+		return;
+	}
+
+	cursor = record;
+	cursor += OSSNPrintf(cursor, ODYSSEY_CAPTURE_META_MAX,
+		"<<<PF-CAPTURE v=1 kind=odyssey-fragregs id=%llu bytes=%u regs_offset=%u encoding=hex>>>\n",
+		(unsigned long long)ui64Id, ui32Bytes, ui32RegsOffset);
+	for (i = 0; i < ui32Bytes; i++)
+	{
+		cursor += OSSNPrintf(cursor, 3, "%02x", pui8Cmd[i]);
+		if ((i & 31U) == 31U || i + 1U == ui32Bytes)
+			*cursor++ = '\n';
+	}
+	OSSNPrintf(cursor, 128, "<<<PF-CAPTURE-END id=%llu sha256=%s>>>",
+		(unsigned long long)ui64Id, digestHex);
+	_OdysseyBufferRecord(record);
 	OSFreeMem(desc);
 	crypto_free_shash(tfm);
 }
@@ -5622,7 +5707,8 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 #if defined(PF_ODYSSEY_CAPTURE)
 	if (g_bOdysseyCapture && psKMHWRTDataSet &&
 		!psKMHWRTDataSet->bOdysseyFirstKickCaptured &&
-		psKMHWRTDataSet->ui64OdysseyCaptureId)
+		psKMHWRTDataSet->ui64OdysseyCaptureId &&
+		pui83DDMCmd && ui323DCmdSize)
 	{
 		IMG_UINT64 ui64KickId = atomic64_inc_return(&g_ui64OdysseyId);
 
@@ -5666,6 +5752,7 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 			psKMHWRTDataSet->sOdysseyVHeapDevVAddr, ui64KickId,
 			psKMHWRTDataSet->ui32OdysseyRT);
 		_OdysseyDumpGeomCmd(ui64KickId, pui8TADMCmd, ui32TACmdSize);
+		_OdysseyDumpFragCmd(ui64KickId, pui83DDMCmd, ui323DCmdSize);
 	}
 #endif
 
