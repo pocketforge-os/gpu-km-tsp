@@ -493,7 +493,7 @@ static void _OdysseyDumpHWRTData(RGX_KM_HW_RT_DATASET *psDataSet,
 		psRTSnapshot->sRTACtl.sValidRenderTargets.ui32Addr,
 		psRTSnapshot->sRTACtl.sRTANumPartialRenders.ui32Addr,
 		psRTSnapshot->ui32HWRTDataFlags, psRTSnapshot->eState,
-		psRTSnapshot->bTACachesNeedZeroing);
+		psCommonSnapshot->bTACachesNeedZeroing);
 	pszCursor += OSSNPrintf(pszCursor, PVR_MAX_DEBUG_MESSAGE_LEN,
 		"<<<PF-CAPTURE-HWRTDATA-SUMMARY v=1 id=%llu rt=%u pmm_list_devva=0x%llx vheap_devva=0x%llx tail_ptrs_devva=0x%llx macrotile_array_devva=0x%llx rtc_devva=0x%llx>>>\n",
 		(unsigned long long)ui64Id, psDataSet->ui32OdysseyRT,
