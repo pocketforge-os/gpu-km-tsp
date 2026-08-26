@@ -94,11 +94,9 @@ static atomic64_t g_ui64OdysseyId = ATOMIC64_INIT(0);
 static atomic64_t g_ui64OdysseyBytes = ATOMIC64_INIT(0);
 
 /*
- * One render contributes up to RGXMKIF_NUM_RTDATAS records of each capture
- * kind (region, VCE, and geom command), for up to
- * 3 * RGXMKIF_NUM_RTDATAS records.
+ * One render contributes up to seven bounded records per RT data slot.
  */
-#define ODYSSEY_CAPTURE_RECORD_CAP (3U * RGXMKIF_NUM_RTDATAS)
+#define ODYSSEY_CAPTURE_RECORD_CAP (7U * RGXMKIF_NUM_RTDATAS)
 #define ODYSSEY_CAPTURE_META_MAX 512U
 static DEFINE_MUTEX(g_sOdysseyCaptureLock);
 static IMG_CHAR *g_apszOdysseyRecords[ODYSSEY_CAPTURE_RECORD_CAP];
@@ -269,8 +267,9 @@ static void _OdysseyDump(PMR *pmr, IMG_DEVMEM_OFFSET_T off, IMG_UINT64 id,
 	OSFreeMem(b64); OSFreeMem(desc); crypto_free_shash(tfm);
 }
 
-static void _OdysseyDumpGeomCmd(IMG_UINT64 ui64Id, const IMG_BYTE *pui8Cmd,
-		IMG_UINT32 ui32Bytes)
+static void _OdysseyDumpEncodedRecord(IMG_UINT64 ui64Id,
+		const IMG_CHAR *pszHeader, const IMG_CHAR *pszName,
+		const IMG_BYTE *pui8Data, IMG_UINT32 ui32Bytes)
 {
 	struct crypto_shash *tfm;
 	struct shash_desc *desc;
@@ -282,8 +281,8 @@ static void _OdysseyDumpGeomCmd(IMG_UINT64 ui64Id, const IMG_BYTE *pui8Cmd,
 	if (IS_ERR(tfm))
 	{
 		PVR_DPF((PVR_DBG_WARNING,
-			"PF-ODYSSEY: skip geom-cmd record id=%llu (sha256 unavailable)",
-			(unsigned long long)ui64Id));
+			"PF-ODYSSEY: skip %s record id=%llu (sha256 unavailable)",
+			pszName, (unsigned long long)ui64Id));
 		return;
 	}
 	desc = OSAllocMem(sizeof(*desc) + crypto_shash_descsize(tfm));
@@ -295,20 +294,20 @@ static void _OdysseyDumpGeomCmd(IMG_UINT64 ui64Id, const IMG_BYTE *pui8Cmd,
 		if (b64) OSFreeMem(b64);
 		crypto_free_shash(tfm);
 		PVR_DPF((PVR_DBG_WARNING,
-			"PF-ODYSSEY: skip geom-cmd record id=%llu (out of memory)",
-			(unsigned long long)ui64Id));
+			"PF-ODYSSEY: skip %s record id=%llu (out of memory)",
+			pszName, (unsigned long long)ui64Id));
 		return;
 	}
 	desc->tfm = tfm;
-	if (crypto_shash_digest(desc, pui8Cmd, ui32Bytes, digest) ||
-		!_OdysseyBase64Encode(pui8Cmd, ui32Bytes, b64, encoded + 1U, &encoded))
+	if (crypto_shash_digest(desc, pui8Data, ui32Bytes, digest) ||
+		!_OdysseyBase64Encode(pui8Data, ui32Bytes, b64, encoded + 1U, &encoded))
 	{
 		OSFreeMem(b64);
 		OSFreeMem(desc);
 		crypto_free_shash(tfm);
 		PVR_DPF((PVR_DBG_WARNING,
-			"PF-ODYSSEY: skip geom-cmd record id=%llu (encoding failed)",
-			(unsigned long long)ui64Id));
+			"PF-ODYSSEY: skip %s record id=%llu (encoding failed)",
+			pszName, (unsigned long long)ui64Id));
 		return;
 	}
 	for (i = 0; i < 32; i++) OSSNPrintf(&hex[i * 2], 3, "%02x", digest[i]);
@@ -319,14 +318,12 @@ static void _OdysseyDumpGeomCmd(IMG_UINT64 ui64Id, const IMG_BYTE *pui8Cmd,
 		OSFreeMem(desc);
 		crypto_free_shash(tfm);
 		PVR_DPF((PVR_DBG_WARNING,
-			"PF-ODYSSEY: skip geom-cmd record id=%llu (out of memory)",
-			(unsigned long long)ui64Id));
+			"PF-ODYSSEY: skip %s record id=%llu (out of memory)",
+			pszName, (unsigned long long)ui64Id));
 		return;
 	}
 	cursor = record;
-	cursor += OSSNPrintf(cursor, ODYSSEY_CAPTURE_META_MAX,
-		"<<<PF-CAPTURE v=1 kind=odyssey-geomcmd id=%llu bytes=%u>>>\n",
-		(unsigned long long)ui64Id, ui32Bytes);
+	cursor += OSSNPrintf(cursor, ODYSSEY_CAPTURE_META_MAX, "%s", pszHeader);
 	for (i = 0; i < encoded; i += 76)
 		cursor += OSSNPrintf(cursor, 78, "%.*s\n",
 			(int)MIN(76U, encoded - i), b64 + i);
@@ -336,6 +333,81 @@ static void _OdysseyDumpGeomCmd(IMG_UINT64 ui64Id, const IMG_BYTE *pui8Cmd,
 	OSFreeMem(b64);
 	OSFreeMem(desc);
 	crypto_free_shash(tfm);
+}
+
+static void _OdysseyDumpGeomCmd(IMG_UINT64 ui64Id, const IMG_BYTE *pui8Cmd,
+		IMG_UINT32 ui32Bytes)
+{
+	IMG_CHAR szHeader[ODYSSEY_CAPTURE_META_MAX];
+
+	OSSNPrintf(szHeader, sizeof(szHeader),
+		"<<<PF-CAPTURE v=1 kind=odyssey-geomcmd id=%llu bytes=%u>>>\n",
+		(unsigned long long)ui64Id, ui32Bytes);
+	_OdysseyDumpEncodedRecord(ui64Id, szHeader, "geom-cmd", pui8Cmd,
+		ui32Bytes);
+}
+
+static void _OdysseyDump3DCmd(IMG_UINT64 ui64Id, IMG_UINT32 ui32Stream,
+		IMG_UINT32 ui32Partial, IMG_UINT32 ui32RT, const IMG_BYTE *pui8Cmd,
+		IMG_UINT32 ui32Bytes)
+{
+	IMG_CHAR szHeader[ODYSSEY_CAPTURE_META_MAX];
+	const CMDTA3D_SHARED *psShared = (const CMDTA3D_SHARED *)pui8Cmd;
+
+	if (!pui8Cmd || ui32Bytes < sizeof(*psShared))
+		return;
+	OSSNPrintf(szHeader, sizeof(szHeader),
+		"<<<PF-CAPTURE v=1 kind=odyssey-fragcmd id=%llu stream=%u partial=%u rt=%u hwrt=0x%x bytes=%u>>>\n",
+		(unsigned long long)ui64Id, ui32Stream, ui32Partial, ui32RT,
+		psShared->sHWRTData.ui32Addr, ui32Bytes);
+	_OdysseyDumpEncodedRecord(ui64Id, szHeader, "frag-cmd", pui8Cmd,
+		ui32Bytes);
+}
+
+static void _OdysseyDumpRgnRecords(PMR *psPMR, IMG_DEVMEM_OFFSET_T uiOffset,
+		IMG_UINT64 ui64Id, IMG_UINT32 ui32RT, IMG_UINT32 ui32Bytes)
+{
+	static const IMG_UINT32 aui32Index[] = { 0U, 1199U };
+	void *pvAddr;
+	size_t uiMapped;
+	IMG_HANDLE hPriv;
+	IMG_UINT32 i;
+	PVRSRV_ERROR eError;
+
+	if (ui32Bytes < (1200U * 5U))
+		return;
+	eError = PMRAcquireKernelMappingData(psPMR, uiOffset, ui32Bytes,
+		&pvAddr, &uiMapped, &hPriv);
+	if (eError != PVRSRV_OK)
+		return;
+	if (uiMapped < ui32Bytes)
+	{
+		PMRReleaseKernelMappingData(psPMR, hPriv);
+		return;
+	}
+	for (i = 0; i < ARRAY_SIZE(aui32Index); i++)
+	{
+		const IMG_UINT8 *pui8Record = (const IMG_UINT8 *)pvAddr +
+			(aui32Index[i] * 5U);
+		IMG_UINT64 ui64Raw = (IMG_UINT64)pui8Record[0] |
+			((IMG_UINT64)pui8Record[1] << 8) |
+			((IMG_UINT64)pui8Record[2] << 16) |
+			((IMG_UINT64)pui8Record[3] << 24) |
+			((IMG_UINT64)pui8Record[4] << 32);
+		IMG_CHAR szHeader[ODYSSEY_CAPTURE_META_MAX];
+
+		OSSNPrintf(szHeader, sizeof(szHeader),
+			"<<<PF-CAPTURE v=1 kind=odyssey-rgn-record id=%llu rt=%u idx=%u x=%u y=%u b0=%u b1=%u b2=%u b3=%u b4=%u u40=0x%llx bytes=5>>>\n",
+			(unsigned long long)ui64Id, ui32RT, aui32Index[i],
+			aui32Index[i] == 0U ? 0U : 39U,
+			aui32Index[i] == 0U ? 0U : 29U,
+			pui8Record[0], pui8Record[1], pui8Record[2],
+			pui8Record[3], pui8Record[4],
+			(unsigned long long)ui64Raw);
+		_OdysseyDumpEncodedRecord(ui64Id, szHeader, "rgn-record",
+			pui8Record, 5U);
+	}
+	PMRReleaseKernelMappingData(psPMR, hPriv);
 }
 
 static void _OdysseyResolveDump(IMG_UINT64 id, IMG_UINT32 rt, IMG_DEV_VIRTADDR va,
@@ -5641,6 +5713,7 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 					"length-out-of-range");
 			}
 			else if (atomic64_add_return(ui32Bytes, &g_ui64OdysseyBytes) <= ODYSSEY_CAPTURE_BOOT_BUDGET)
+			{
 				_OdysseyDump(psKMHWRTDataSet->psOdysseyPMR,
 				psKMHWRTDataSet->uiOdysseyPMROffset, ui64KickId,
 				psKMHWRTDataSet->ui32OdysseyRT,
@@ -5650,6 +5723,10 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 				psKMHWRTDataSet->ui32OdysseyTEMTILE2,
 				psKMHWRTDataSet->ui32OdysseyTEScreen,
 				psKMHWRTDataSet->ui32OdysseyISPMtileSize);
+				_OdysseyDumpRgnRecords(psKMHWRTDataSet->psOdysseyPMR,
+					psKMHWRTDataSet->uiOdysseyPMROffset, ui64KickId,
+					psKMHWRTDataSet->ui32OdysseyRT, ui32Bytes);
+			}
 			else
 			{
 				atomic64_sub(ui32Bytes, &g_ui64OdysseyBytes);
@@ -5666,6 +5743,13 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 			psKMHWRTDataSet->sOdysseyVHeapDevVAddr, ui64KickId,
 			psKMHWRTDataSet->ui32OdysseyRT);
 		_OdysseyDumpGeomCmd(ui64KickId, pui8TADMCmd, ui32TACmdSize);
+		_OdysseyDump3DCmd(ui64KickId, 0U, 0U,
+			psKMHWRTDataSet->ui32OdysseyRT, pui83DDMCmd,
+			ui323DCmdSize);
+		if (pui83DPRDMCmd)
+			_OdysseyDump3DCmd(ui64KickId, 1U, 1U,
+				psKMHWRTDataSet->ui32OdysseyRT, pui83DPRDMCmd,
+				ui323DPRCmdSize);
 	}
 #endif
 
