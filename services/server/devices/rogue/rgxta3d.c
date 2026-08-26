@@ -1967,8 +1967,7 @@ PVRSRV_ERROR RGXCreateHWRTDataSet(CONNECTION_DATA      *psConnection,
 	/* Diagnostic: the closed UM's 640x480 HWRT tuple, numeric output only. */
 	if (ui32ScreenPixelMax == 0x01df027fU)
 	{
-		PVR_DPF((PVR_DBG_WARNING,
-				"PF-VENDOR-HWRT screen_pmax=0x%08x te_screen=0x%08x "
+		PVR_LOG(("PF-VENDOR-HWRT screen_pmax=0x%08x te_screen=0x%08x "
 				"te_mtile1=0x%08x te_mtile2=0x%08x mtile_stride=%u "
 				"rgnhdr=%u isp_mtile=0x%08x\n",
 				ui32ScreenPixelMax, ui32TEScreen, ui32TEMTILE1,
