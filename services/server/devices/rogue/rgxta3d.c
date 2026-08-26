@@ -1964,6 +1964,18 @@ PVRSRV_ERROR RGXCreateHWRTDataSet(CONNECTION_DATA      *psConnection,
 	DEVMEM_MEMDESC				*psHWRTDataCommonFwMemDesc;
 	RGXFWIF_DEV_VIRTADDR		sHWRTDataCommonFwAddr;
 
+	/* Diagnostic: the closed UM's 640x480 HWRT tuple, numeric output only. */
+	if (ui32ScreenPixelMax == 0x01df027fU)
+	{
+		PVR_DPF((PVR_DBG_WARNING,
+				"PF-VENDOR-HWRT screen_pmax=0x%08x te_screen=0x%08x "
+				"te_mtile1=0x%08x te_mtile2=0x%08x mtile_stride=%u "
+				"rgnhdr=%u isp_mtile=0x%08x\n",
+				ui32ScreenPixelMax, ui32TEScreen, ui32TEMTILE1,
+				ui32TEMTILE2, ui32MTileStride, uiRgnHeaderSize,
+				ui32ISPMtileSize));
+	}
+
 	/* Prepare KM cleanup object for HWRTDataCommon FW object */
 	psHWRTDataCommonCookie = OSAllocZMem(sizeof(*psHWRTDataCommonCookie));
 	if (psHWRTDataCommonCookie == NULL)
