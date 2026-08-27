@@ -4407,12 +4407,6 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 		IMG_UINT32			ui32NumberOfMRTs,
 		IMG_UINT64			ui64DeadlineInus)
 {
-	/* TEMP PF-ODYSSEY-KICK diagnostic — remove before merge */
-	pr_info("PF-ODYSSEY-KICK: TA=%px TA_sz=%u 3D=%px 3D_sz=%u 3DPR=%px 3DPR_sz=%u kickTA=%u kick3D=%u kickPR=%u abort=%u\n",
-		pui8TADMCmd, ui32TACmdSize, pui83DDMCmd, ui323DCmdSize,
-		pui83DPRDMCmd, ui323DPRCmdSize, bKickTA, bKick3D, bKickPR,
-		bAbort);
-
 	/* per-context helper structures */
 	RGX_CCB_CMD_HELPER_DATA *pasTACmdHelperData = psRenderContext->asTACmdHelperData;
 	RGX_CCB_CMD_HELPER_DATA *pas3DCmdHelperData = psRenderContext->as3DCmdHelperData;
@@ -4528,6 +4522,12 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 	IMG_PID uiCurrentProcess = OSGetCurrentClientProcessIDKM();
 
 	IMG_UINT32 ui32Client3DFenceCount = 0;
+
+	/* TEMP PF-ODYSSEY-KICK diagnostic — remove before merge */
+	pr_info("PF-ODYSSEY-KICK: TA=%px TA_sz=%u 3D=%px 3D_sz=%u 3DPR=%px 3DPR_sz=%u kickTA=%u kick3D=%u kickPR=%u abort=%u\n",
+		pui8TADMCmd, ui32TACmdSize, pui83DDMCmd, ui323DCmdSize,
+		pui83DPRDMCmd, ui323DPRCmdSize, bKickTA, bKick3D, bKickPR,
+		bAbort);
 
 	/* Ensure we haven't been given a null ptr to
 	 * TA fence values if we have been told we
