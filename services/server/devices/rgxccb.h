@@ -266,6 +266,15 @@ void RGXReleaseCCB(RGX_CLIENT_CCB *psClientCCB,
 IMG_UINT32 RGXGetHostWriteOffsetCCB(RGX_CLIENT_CCB *psClientCCB);
 IMG_UINT32 RGXGetWrapMaskCCB(RGX_CLIENT_CCB *psClientCCB);
 
+#if defined(PF_ODYSSEY_CAPTURE)
+PVRSRV_ERROR RGXGetReadOffsetCCB(RGX_CLIENT_CCB *psClientCCB,
+		IMG_UINT32 *pui32ReadOffset);
+PVRSRV_ERROR RGXSnapshotCCBRange(RGX_CLIENT_CCB *psClientCCB,
+		IMG_UINT32 ui32StartOffset, IMG_UINT32 ui32EndOffset,
+		void *pvSnapshot, IMG_UINT32 ui32SnapshotSize,
+		IMG_UINT32 *pui32BytesCopied);
+#endif
+
 void RGXSetCCBFlags(RGX_CLIENT_CCB *psClientCCB,
 					IMG_UINT32		ui32Flags);
 

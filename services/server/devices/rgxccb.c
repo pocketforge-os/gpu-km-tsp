@@ -1581,6 +1581,46 @@ IMG_UINT32 RGXGetWrapMaskCCB(RGX_CLIENT_CCB *psClientCCB)
 	return psClientCCB->ui32Size-1;
 }
 
+#if defined(PF_ODYSSEY_CAPTURE)
+PVRSRV_ERROR RGXGetReadOffsetCCB(RGX_CLIENT_CCB *psClientCCB,
+		IMG_UINT32 *pui32ReadOffset)
+{
+	if (!psClientCCB || !psClientCCB->psClientCCBCtrl || !pui32ReadOffset)
+		return PVRSRV_ERROR_INVALID_PARAMS;
+	*pui32ReadOffset = psClientCCB->psClientCCBCtrl->ui32ReadOffset;
+	return PVRSRV_OK;
+}
+
+PVRSRV_ERROR RGXSnapshotCCBRange(RGX_CLIENT_CCB *psClientCCB,
+		IMG_UINT32 ui32StartOffset, IMG_UINT32 ui32EndOffset,
+		void *pvSnapshot, IMG_UINT32 ui32SnapshotSize,
+		IMG_UINT32 *pui32BytesCopied)
+{
+	IMG_UINT32 ui32Bytes;
+	IMG_UINT32 ui32FirstBytes;
+
+	if (!psClientCCB || !psClientCCB->pvClientCCB || !pvSnapshot ||
+		!pui32BytesCopied || !ui32SnapshotSize || !psClientCCB->ui32Size)
+		return PVRSRV_ERROR_INVALID_PARAMS;
+
+	ui32StartOffset &= psClientCCB->ui32Size - 1U;
+	ui32EndOffset &= psClientCCB->ui32Size - 1U;
+	ui32Bytes = (ui32EndOffset - ui32StartOffset) &
+		(psClientCCB->ui32Size - 1U);
+	ui32Bytes = MIN(ui32Bytes, ui32SnapshotSize);
+	ui32FirstBytes = MIN(ui32Bytes,
+		psClientCCB->ui32Size - ui32StartOffset);
+	OSDeviceMemCopy(pvSnapshot,
+		(IMG_UINT8 *)psClientCCB->pvClientCCB + ui32StartOffset,
+		ui32FirstBytes);
+	if (ui32Bytes > ui32FirstBytes)
+		OSDeviceMemCopy((IMG_UINT8 *)pvSnapshot + ui32FirstBytes,
+			psClientCCB->pvClientCCB, ui32Bytes - ui32FirstBytes);
+	*pui32BytesCopied = ui32Bytes;
+	return PVRSRV_OK;
+}
+#endif
+
 void RGXSetCCBFlags(RGX_CLIENT_CCB *psClientCCB,
 					IMG_UINT32		ui32Flags)
 {
