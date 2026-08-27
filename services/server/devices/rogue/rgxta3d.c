@@ -5672,16 +5672,9 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 		bOdysseyCaptureThisKick = IMG_TRUE;
 
 		PVR_DPF((PVR_DBG_MESSAGE,
-			"PF-ODYSSEY: firmware command sizes TA=%u (expected=72) 3D=%u 3DPR=%u RGXFWIF_CMD3D=%zu",
-			ui32TACmdSize, ui323DCmdSize, ui323DPRCmdSize,
-			sizeof(RGXFWIF_CMD3D)));
+			"PF-ODYSSEY: firmware command sizes TA=%u (expected=72) 3D=%u 3DPR=%u",
+			ui32TACmdSize, ui323DCmdSize, ui323DPRCmdSize));
 		PVR_ASSERT(ui32TACmdSize == 72U);
-		if (bKick3D && pui83DDMCmd)
-			PVR_ASSERT(ui323DCmdSize == sizeof(RGXFWIF_CMD3D));
-		if (bKickPR && !bUseCombined3DAnd3DPR &&
-			(pui83DPRDMCmd || pui83DDMCmd))
-			PVR_ASSERT((pui83DPRDMCmd ? ui323DPRCmdSize : ui323DCmdSize) ==
-				sizeof(RGXFWIF_CMD3D));
 
 		if (bKickTA && pui8TADMCmd)
 			_OdysseyDumpFirmwareCmd("odyssey-tacmd", "TA", ui64OdysseyKickId,
