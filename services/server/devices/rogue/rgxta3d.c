@@ -102,6 +102,30 @@ module_param_named(odyssey_capture, g_bOdysseyCapture, bool, 0600);
 MODULE_PARM_DESC(odyssey_capture, "Enable bounded ODYSSEY render-state capture");
 static atomic64_t g_ui64OdysseyId = ATOMIC64_INIT(0);
 static atomic64_t g_ui64OdysseyBytes = ATOMIC64_INIT(0);
+static atomic_t g_iOdysseyDirect3DCalls = ATOMIC_INIT(0);
+
+/* TEMP PF-ODYSSEY direct command diagnostic — remove after capture campaign. */
+static void _OdysseyLogDirectCmd(const IMG_CHAR *pszTag, IMG_UINT32 ui32Index,
+		const IMG_BYTE *pui8Cmd, IMG_UINT32 ui32Size)
+{
+	IMG_CHAR aszHex[385];
+	IMG_UINT32 ui32Offset;
+	IMG_UINT32 ui32Byte;
+	IMG_UINT32 ui32Chunk;
+
+	for (ui32Offset = 0; ui32Offset < ui32Size; )
+	{
+		ui32Chunk = MIN(192U, ui32Size - ui32Offset);
+		for (ui32Byte = 0; ui32Byte < ui32Chunk; ui32Byte++)
+			OSSNPrintf(&aszHex[ui32Byte * 2U], 3, "%02x",
+				pui8Cmd[ui32Offset + ui32Byte]);
+
+		PVR_DPF((PVR_DBG_ERROR,
+			"PF-%s: idx=%u sz=%u off=%u hex=%s",
+			pszTag, ui32Index, ui32Size, ui32Offset, aszHex));
+		ui32Offset += ui32Chunk;
+	}
+}
 
 /*
  * One render contributes initial and post-geometry regions, PM, geometry
@@ -4451,6 +4475,7 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 #if defined(PF_ODYSSEY_CAPTURE)
 	IMG_BOOL bOdysseyCaptureThisKick = IMG_FALSE;
 	IMG_UINT64 ui64OdysseyKickId = 0;
+	IMG_UINT32 ui32OdysseyDirectIdx = 0;
 	IMG_BYTE *pui8OdysseyTACmd = NULL;
 	IMG_BYTE *pui8Odyssey3DCmd = NULL;
 	IMG_BYTE *pui8Odyssey3DPRCmd = NULL;
@@ -4524,10 +4549,34 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 	IMG_UINT32 ui32Client3DFenceCount = 0;
 
 	/* TEMP PF-ODYSSEY-KICK diagnostic — remove before merge */
-	pr_info("PF-ODYSSEY-KICK: TA=%px TA_sz=%u 3D=%px 3D_sz=%u 3DPR=%px 3DPR_sz=%u kickTA=%u kick3D=%u kickPR=%u abort=%u\n",
+	PVR_DPF((PVR_DBG_ERROR,
+		"PF-ODYSSEY-KICK: TA=%px TA_sz=%u 3D=%px 3D_sz=%u 3DPR=%px 3DPR_sz=%u kickTA=%u kick3D=%u kickPR=%u abort=%u",
 		pui8TADMCmd, ui32TACmdSize, pui83DDMCmd, ui323DCmdSize,
 		pui83DPRDMCmd, ui323DPRCmdSize, bKickTA, bKick3D, bKickPR,
-		bAbort);
+		bAbort));
+
+#if defined(PF_ODYSSEY_CAPTURE)
+	/*
+	 * Bypass the selected-kick machinery for three command-bearing calls so
+	 * the firmware command bytes are visible even if capture publication fails.
+	 */
+	if (g_bOdysseyCapture && pui83DDMCmd && ui323DCmdSize)
+	{
+		ui32OdysseyDirectIdx = (IMG_UINT32)atomic_inc_return(
+			&g_iOdysseyDirect3DCalls);
+		if (ui32OdysseyDirectIdx <= 3U)
+		{
+			_OdysseyLogDirectCmd("3DCMD", ui32OdysseyDirectIdx,
+				pui83DDMCmd, ui323DCmdSize);
+			if (pui8TADMCmd && ui32TACmdSize)
+				_OdysseyLogDirectCmd("TACMD", ui32OdysseyDirectIdx,
+					pui8TADMCmd, ui32TACmdSize);
+			if (pui83DPRDMCmd && ui323DPRCmdSize)
+				_OdysseyLogDirectCmd("3DPRCMD", ui32OdysseyDirectIdx,
+					pui83DPRDMCmd, ui323DPRCmdSize);
+		}
+	}
+#endif
 
 	/* Ensure we haven't been given a null ptr to
 	 * TA fence values if we have been told we
