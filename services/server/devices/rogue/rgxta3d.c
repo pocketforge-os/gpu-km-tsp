@@ -91,6 +91,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #define ODYSSEY_POSTGEOM_RETRY_MS 1U
 /* The Rogue Services VHeap table occupies one device page. */
 #define ODYSSEY_VHEAP_TABLE_BYTES (4U * 1024U)
+#define ODYSSEY_CCB_DUMP_BYTES (4U * 1024U)
 extern PVRSRV_ERROR DevmemIntDiagAcquirePMR(IMG_DEV_VIRTADDR sDevVAddr,
 		IMG_DEVMEM_SIZE_T uiSize, PMR **ppsPMR,
 		IMG_DEVMEM_OFFSET_T *puiPMROffset, const IMG_CHAR **ppszReason);
@@ -506,6 +507,50 @@ static void _OdysseyDumpFirmwareCmd(const IMG_CHAR *pszKind,
 		PVR_DPF((PVR_DBG_WARNING,
 			"PF-ODYSSEY: skip %s record id=%llu (emit failed)",
 			pszKind, (unsigned long long)ui64Id));
+}
+
+static void _OdysseyDumpClientCCB(const IMG_CHAR *pszKind,
+		IMG_UINT64 ui64Id, RGX_CLIENT_CCB *psClientCCB,
+		IMG_UINT32 ui32StartOffset, IMG_UINT32 ui32EndOffset)
+{
+	IMG_BYTE *pui8Snapshot;
+	IMG_UINT32 ui32Bytes = 0;
+	IMG_UINT32 ui32Span;
+	IMG_UINT32 ui32WrapMask;
+	PVRSRV_ERROR eError;
+	IMG_CHAR aszKind[64];
+	IMG_CHAR aszMetadata[ODYSSEY_CAPTURE_META_MAX];
+
+	OSSNPrintf(aszKind, sizeof(aszKind), "kind=%s", pszKind);
+	if (!psClientCCB)
+	{
+		_OdysseyEmitError(aszKind, ui64Id, "memory=client-ccb",
+			"client-ccb-null");
+		return;
+	}
+	ui32WrapMask = RGXGetWrapMaskCCB(psClientCCB);
+	ui32Span = (ui32EndOffset - ui32StartOffset) & ui32WrapMask;
+	pui8Snapshot = OSAllocMem(ODYSSEY_CCB_DUMP_BYTES);
+	if (!pui8Snapshot)
+	{
+		_OdysseyEmitError(aszKind, ui64Id, "memory=client-ccb",
+			"snapshot-alloc-failed");
+		return;
+	}
+	eError = RGXSnapshotCCBRange(psClientCCB, ui32StartOffset,
+		ui32EndOffset, pui8Snapshot, ODYSSEY_CCB_DUMP_BYTES,
+		&ui32Bytes);
+	OSSNPrintf(aszMetadata, sizeof(aszMetadata),
+		"memory=client-ccb start=%u end=%u wrap_mask=0x%x span=%u capped=%u",
+		ui32StartOffset, ui32EndOffset, ui32WrapMask, ui32Span,
+		(IMG_UINT32)(ui32Span > ODYSSEY_CCB_DUMP_BYTES));
+	if (eError != PVRSRV_OK || !ui32Bytes)
+		_OdysseyEmitError(aszKind, ui64Id, aszMetadata,
+			eError == PVRSRV_OK ? "empty-ccb-span" : "client-ccb-unmapped");
+	else
+		(void)_OdysseyEmitPayload(aszKind, ui64Id, aszMetadata,
+			pui8Snapshot, ui32Bytes);
+	OSFreeMem(pui8Snapshot);
 }
 
 static void _OdysseyResolveDumpForPID(IMG_UINT64 id, IMG_UINT32 rt,
@@ -4416,7 +4461,6 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 	IMG_UINT32				ui323DCmdCount=0;
 	IMG_UINT32				ui32TACmdOffset=0;
 	IMG_UINT32				ui323DCmdOffset=0;
-	unsigned long ulOdysseyDiagFlags = 0;
 	RGXFWIF_UFO				sPRUFO;
 	IMG_UINT32				i;
 	PVRSRV_ERROR			eError = PVRSRV_OK;
@@ -4453,7 +4497,6 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 #if defined(PF_ODYSSEY_CAPTURE)
 	IMG_BOOL bOdysseyCaptureThisKick = IMG_FALSE;
 	IMG_UINT64 ui64OdysseyKickId = 0;
-	IMG_UINT64 ui64OdysseyDirectId = 0;
 	IMG_UINT32 ui32OdysseyDirectIdx = 0;
 	IMG_BYTE *pui8OdysseyTACmd = NULL;
 	IMG_BYTE *pui8Odyssey3DCmd = NULL;
@@ -4526,45 +4569,6 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 	IMG_PID uiCurrentProcess = OSGetCurrentClientProcessIDKM();
 
 	IMG_UINT32 ui32Client3DFenceCount = 0;
-
-	/* TEMP PF-ODYSSEY-KICK diagnostic — remove before merge */
-	PVRSRVReleasePrintfLock(&ulOdysseyDiagFlags);
-	PVRSRVReleasePrintfLocked(
-		"PF-ODYSSEY-KICK: TA=%px TA_sz=%u 3D=%px 3D_sz=%u 3DPR=%px 3DPR_sz=%u kickTA=%u kick3D=%u kickPR=%u abort=%u",
-		pui8TADMCmd, ui32TACmdSize, pui83DDMCmd, ui323DCmdSize,
-		pui83DPRDMCmd, ui323DPRCmdSize, bKickTA, bKick3D, bKickPR,
-		bAbort);
-	PVRSRVReleasePrintfUnlock(ulOdysseyDiagFlags);
-
-#if defined(PF_ODYSSEY_CAPTURE)
-	/*
-	 * Bypass the selected-kick snapshot machinery for two command-bearing calls.
-	 * Buffer the source parameters so the delayed-work ring drain, rather than
-	 * an inline print path, publishes the firmware command bytes.
-	 */
-	if (g_bOdysseyCapture && pui83DDMCmd && ui323DCmdSize)
-	{
-		ui32OdysseyDirectIdx = (IMG_UINT32)atomic_inc_return(
-			&g_iOdysseyDirect3DCalls);
-		if (ui32OdysseyDirectIdx <= 2U)
-		{
-			ui64OdysseyDirectId = atomic64_inc_return(&g_ui64OdysseyId);
-			_OdysseyDumpFirmwareCmd("odyssey-3dcmd",
-				bAbort ? "ABORT" : "3D", ui64OdysseyDirectId,
-				pui83DDMCmd, ui323DCmdSize, bKickTA, bKickPR,
-				bKick3D, bUseCombined3DAnd3DPR);
-			if (pui8TADMCmd && ui32TACmdSize)
-				_OdysseyDumpFirmwareCmd("odyssey-tacmd", "TA",
-					ui64OdysseyDirectId, pui8TADMCmd, ui32TACmdSize,
-					bKickTA, bKickPR, bKick3D, bUseCombined3DAnd3DPR);
-			if (pui83DPRDMCmd && ui323DPRCmdSize)
-				_OdysseyDumpFirmwareCmd("odyssey-3dprcmd", "3D_PR",
-					ui64OdysseyDirectId, pui83DPRDMCmd,
-					ui323DPRCmdSize, bKickTA, bKickPR, bKick3D,
-					bUseCombined3DAnd3DPR);
-		}
-	}
-#endif
 
 	/* Ensure we haven't been given a null ptr to
 	 * TA fence values if we have been told we
@@ -6093,6 +6097,52 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 		}
 #endif
 	}
+
+#if defined(PF_ODYSSEY_CAPTURE)
+	/*
+	 * Closed UM writes the commands directly into these client CCB mappings;
+	 * the ioctl supplies offsets only. Snapshot the exact released spans while
+	 * they are stable and retain them in the existing delayed-drain ring.
+	 */
+	if (g_bOdysseyCapture && (ui32TACmdCount || ui323DCmdCount))
+	{
+		ui32OdysseyDirectIdx = (IMG_UINT32)atomic_inc_return(
+			&g_iOdysseyDirect3DCalls);
+		if (ui32OdysseyDirectIdx <= 2U)
+		{
+			IMG_UINT64 ui64CCBId = atomic64_inc_return(&g_ui64OdysseyId);
+			RGX_CLIENT_CCB *psOdysseyCCB;
+			IMG_UINT32 ui32ReadOffset;
+
+			if (ui32TACmdCount)
+			{
+				psOdysseyCCB = FWCommonContextGetClientCCB(
+					psRenderContext->sTAData.psServerCommonContext);
+				if (RGXGetReadOffsetCCB(psOdysseyCCB,
+					&ui32ReadOffset) == PVRSRV_OK)
+					_OdysseyDumpClientCCB("odyssey-ccbta", ui64CCBId,
+						psOdysseyCCB, ui32ReadOffset,
+						RGXGetHostWriteOffsetCCB(psOdysseyCCB));
+				else
+					_OdysseyEmitError("kind=odyssey-ccbta", ui64CCBId,
+						"memory=client-ccb", "ccb-control-unmapped");
+			}
+			if (ui323DCmdCount)
+			{
+				psOdysseyCCB = FWCommonContextGetClientCCB(
+					psRenderContext->s3DData.psServerCommonContext);
+				if (RGXGetReadOffsetCCB(psOdysseyCCB,
+					&ui32ReadOffset) == PVRSRV_OK)
+					_OdysseyDumpClientCCB("odyssey-ccb3d", ui64CCBId,
+						psOdysseyCCB, ui32ReadOffset,
+						RGXGetHostWriteOffsetCCB(psOdysseyCCB));
+				else
+					_OdysseyEmitError("kind=odyssey-ccb3d", ui64CCBId,
+						"memory=client-ccb", "ccb-control-unmapped");
+			}
+		}
+	}
+#endif
 
 	if (ui32TACmdCount)
 	{
