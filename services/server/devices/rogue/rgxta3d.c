@@ -106,15 +106,16 @@ static atomic64_t g_ui64OdysseyBytes = ATOMIC64_INIT(0);
 /*
  * One render contributes initial and post-geometry regions, PM, geometry
  * command, TA/3D/3D-PR commands and (if necessary) PB-truncation record per RT, plus up to
- * ODYSSEY_PB_TILE_CAP PB records.
+ * ODYSSEY_PB_TILE_CAP PB records. 512 slots comfortably retain the observed
+ * 97-record PB family plus command/meta records and additional RT data.
  * R23's VCE diagnostic remains an immediate log record and does not occupy
  * this buffered transport ring.
  */
-#define ODYSSEY_CAPTURE_RECORD_CAP \
-	((ODYSSEY_PB_TILE_CAP + 9U) * RGXMKIF_NUM_RTDATAS)
+#define ODYSSEY_CAPTURE_RECORD_CAP 512U
 #define ODYSSEY_CAPTURE_META_MAX 1536U
 static DEFINE_MUTEX(g_sOdysseyCaptureLock);
 static IMG_CHAR *g_apszOdysseyRecords[ODYSSEY_CAPTURE_RECORD_CAP];
+static IMG_BOOL g_abOdysseyRecordIsPB[ODYSSEY_CAPTURE_RECORD_CAP];
 static IMG_UINT32 g_ui32OdysseyRecordCount;
 static IMG_UINT32 g_ui32OdysseyDropped;
 
@@ -139,23 +140,50 @@ typedef struct _ODYSSEY_EMIT_ACCOUNT_
 	ODYSSEY_KIND_ACCOUNT asKind[ODYSSEY_CAPTURE_KIND_COUNT];
 } ODYSSEY_EMIT_ACCOUNT;
 
-static void _OdysseyBufferRecord(IMG_CHAR *record)
+static void _OdysseyBufferRecord(IMG_CHAR *record, IMG_BOOL bIsPB)
 {
 	IMG_CHAR *old = NULL;
+	IMG_UINT32 ui32Evict;
 
 	mutex_lock(&g_sOdysseyCaptureLock);
 	if (g_ui32OdysseyRecordCount == ODYSSEY_CAPTURE_RECORD_CAP)
 	{
-		old = g_apszOdysseyRecords[0];
-		PVR_DPF((PVR_DBG_WARNING,
-			"PF-ODYSSEY: capture ring overflow — evicting oldest record (cap=%u); increase ODYSSEY_CAPTURE_RECORD_CAP",
-			(unsigned)ODYSSEY_CAPTURE_RECORD_CAP));
-		memmove(&g_apszOdysseyRecords[0], &g_apszOdysseyRecords[1],
-			(ODYSSEY_CAPTURE_RECORD_CAP - 1U) * sizeof(record));
-		g_ui32OdysseyRecordCount--;
+		/* Preserve command/meta records while any lower-value PB record remains. */
+		for (ui32Evict = 0; ui32Evict < g_ui32OdysseyRecordCount; ui32Evict++)
+		{
+			if (g_abOdysseyRecordIsPB[ui32Evict])
+				break;
+		}
+		if (ui32Evict < g_ui32OdysseyRecordCount)
+		{
+			old = g_apszOdysseyRecords[ui32Evict];
+			PVR_DPF((PVR_DBG_WARNING,
+				"PF-ODYSSEY: capture ring overflow — evicting oldest PB record (cap=%u)",
+				(unsigned)ODYSSEY_CAPTURE_RECORD_CAP));
+			memmove(&g_apszOdysseyRecords[ui32Evict],
+				&g_apszOdysseyRecords[ui32Evict + 1U],
+				(g_ui32OdysseyRecordCount - ui32Evict - 1U) * sizeof(record));
+			memmove(&g_abOdysseyRecordIsPB[ui32Evict],
+				&g_abOdysseyRecordIsPB[ui32Evict + 1U],
+				(g_ui32OdysseyRecordCount - ui32Evict - 1U) * sizeof(bIsPB));
+			g_ui32OdysseyRecordCount--;
+		}
+		else
+		{
+			old = record;
+			record = NULL;
+			PVR_DPF((PVR_DBG_WARNING,
+				"PF-ODYSSEY: capture ring overflow — dropping new record; no PB record is evictable (cap=%u)",
+				(unsigned)ODYSSEY_CAPTURE_RECORD_CAP));
+		}
 		g_ui32OdysseyDropped++;
 	}
-	g_apszOdysseyRecords[g_ui32OdysseyRecordCount++] = record;
+	if (record)
+	{
+		g_apszOdysseyRecords[g_ui32OdysseyRecordCount] = record;
+		g_abOdysseyRecordIsPB[g_ui32OdysseyRecordCount] = bIsPB;
+		g_ui32OdysseyRecordCount++;
+	}
 	mutex_unlock(&g_sOdysseyCaptureLock);
 	if (old)
 		OSFreeMem(old);
@@ -192,6 +220,7 @@ static int _OdysseyCaptureDumpSet(const char *val, const struct kernel_param *kp
 	{
 		OSFreeMem(g_apszOdysseyRecords[i]);
 		g_apszOdysseyRecords[i] = NULL;
+		g_abOdysseyRecordIsPB[i] = IMG_FALSE;
 	}
 	g_ui32OdysseyRecordCount = 0;
 	g_ui32OdysseyDropped = 0;
@@ -313,7 +342,8 @@ static IMG_BOOL _OdysseyEmitPayloadDetailed(const IMG_CHAR *pszKindField,
 			(int)MIN(76U, ui32Encoded - i), pszB64 + i);
 	OSSNPrintf(pszCursor, 128, "<<<PF-CAPTURE-END id=%llu sha256=%s>>>",
 		(unsigned long long)ui64Id, aszHex);
-	_OdysseyBufferRecord(pszRecord);
+	_OdysseyBufferRecord(pszRecord,
+		strcmp(pszKindField, "kind=odyssey-pb") == 0);
 	bOK = IMG_TRUE;
 
 out:
@@ -5693,6 +5723,9 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 				pui83DPRDMCmd ? ui323DPRCmdSize : ui323DCmdSize,
 				bKickTA, bKickPR, bKick3D,
 				bUseCombined3DAnd3DPR);
+		if (bKickTA && pui8TADMCmd)
+			_OdysseyDumpGeomCmd(ui64OdysseyKickId,
+				pui8TADMCmd, ui32TACmdSize);
 	}
 #endif
 
@@ -6327,8 +6360,6 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 			psKMHWRTDataSet->sOdysseyVHeapDevVAddr,
 			psKMHWRTDataSet->ui64OdysseyPostGeomId,
 			psKMHWRTDataSet->ui32OdysseyRT);
-		_OdysseyDumpGeomCmd(psKMHWRTDataSet->ui64OdysseyPostGeomId,
-			pui8TADMCmd, ui32TACmdSize);
 	}
 #endif
 
