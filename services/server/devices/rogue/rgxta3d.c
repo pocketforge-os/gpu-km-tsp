@@ -104,6 +104,7 @@ MODULE_PARM_DESC(odyssey_capture, "Enable bounded ODYSSEY render-state capture")
 static atomic64_t g_ui64OdysseyId = ATOMIC64_INIT(0);
 static atomic64_t g_ui64OdysseyBytes = ATOMIC64_INIT(0);
 static atomic_t g_iOdysseyDirect3DCalls = ATOMIC_INIT(0);
+static atomic_t g_iOdysseyDirectCmdCalls = ATOMIC_INIT(0);
 
 /*
  * One render contributes initial and post-geometry regions, PM, geometry
@@ -4498,6 +4499,9 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 	IMG_BOOL bOdysseyCaptureThisKick = IMG_FALSE;
 	IMG_UINT64 ui64OdysseyKickId = 0;
 	IMG_UINT32 ui32OdysseyDirectIdx = 0;
+	IMG_UINT32 ui32OdysseyDirectCmdIdx = 0;
+	IMG_UINT64 ui64OdysseyDirectCmdId = 0;
+	IMG_CHAR aszOdysseyDirectCmdMetadata[64];
 	IMG_BYTE *pui8OdysseyTACmd = NULL;
 	IMG_BYTE *pui8Odyssey3DCmd = NULL;
 	IMG_BYTE *pui8Odyssey3DPRCmd = NULL;
@@ -4569,6 +4573,52 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 	IMG_PID uiCurrentProcess = OSGetCurrentClientProcessIDKM();
 
 	IMG_UINT32 ui32Client3DFenceCount = 0;
+
+#if defined(PF_ODYSSEY_CAPTURE)
+	/*
+	 * Round 8: bypass the first-kick latch/publish path completely. Capture
+	 * the raw ioctl command inputs before any HWRTData patching can alter them.
+	 */
+	if (pui83DDMCmd && ui323DCmdSize)
+	{
+		ui32OdysseyDirectCmdIdx = (IMG_UINT32)atomic_inc_return(
+			&g_iOdysseyDirectCmdCalls);
+		if (ui32OdysseyDirectCmdIdx <= 3U)
+		{
+			ui64OdysseyDirectCmdId = atomic64_inc_return(&g_ui64OdysseyId);
+			OSSNPrintf(aszOdysseyDirectCmdMetadata,
+				sizeof(aszOdysseyDirectCmdMetadata), "idx=%u size=%u",
+				ui32OdysseyDirectCmdIdx, ui323DCmdSize);
+			(void)_OdysseyEmitPayload("kind=odyssey-3dcmd",
+				ui64OdysseyDirectCmdId, aszOdysseyDirectCmdMetadata,
+				pui83DDMCmd, ui323DCmdSize);
+
+			if (pui8TADMCmd && ui32TACmdSize)
+			{
+				OSSNPrintf(aszOdysseyDirectCmdMetadata,
+					sizeof(aszOdysseyDirectCmdMetadata),
+					"idx=%u size=%u", ui32OdysseyDirectCmdIdx,
+					ui32TACmdSize);
+				(void)_OdysseyEmitPayload("kind=odyssey-tacmd",
+					ui64OdysseyDirectCmdId,
+					aszOdysseyDirectCmdMetadata, pui8TADMCmd,
+					ui32TACmdSize);
+			}
+
+			if (pui83DPRDMCmd && ui323DPRCmdSize)
+			{
+				OSSNPrintf(aszOdysseyDirectCmdMetadata,
+					sizeof(aszOdysseyDirectCmdMetadata),
+					"idx=%u size=%u", ui32OdysseyDirectCmdIdx,
+					ui323DPRCmdSize);
+				(void)_OdysseyEmitPayload("kind=odyssey-3dprcmd",
+					ui64OdysseyDirectCmdId,
+					aszOdysseyDirectCmdMetadata, pui83DPRDMCmd,
+					ui323DPRCmdSize);
+			}
+		}
+	}
+#endif
 
 	/* Ensure we haven't been given a null ptr to
 	 * TA fence values if we have been told we
