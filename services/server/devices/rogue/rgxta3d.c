@@ -104,32 +104,6 @@ static atomic64_t g_ui64OdysseyId = ATOMIC64_INIT(0);
 static atomic64_t g_ui64OdysseyBytes = ATOMIC64_INIT(0);
 static atomic_t g_iOdysseyDirect3DCalls = ATOMIC_INIT(0);
 
-/* TEMP PF-ODYSSEY direct command diagnostic — remove after capture campaign. */
-static void _OdysseyLogDirectCmd(const IMG_CHAR *pszTag, IMG_UINT32 ui32Index,
-		const IMG_BYTE *pui8Cmd, IMG_UINT32 ui32Size)
-{
-	IMG_CHAR aszHex[385];
-	IMG_UINT32 ui32Offset;
-	IMG_UINT32 ui32Byte;
-	IMG_UINT32 ui32Chunk;
-	unsigned long flags = 0;
-
-	for (ui32Offset = 0; ui32Offset < ui32Size; )
-	{
-		ui32Chunk = MIN(192U, ui32Size - ui32Offset);
-		for (ui32Byte = 0; ui32Byte < ui32Chunk; ui32Byte++)
-			OSSNPrintf(&aszHex[ui32Byte * 2U], 3, "%02x",
-				pui8Cmd[ui32Offset + ui32Byte]);
-
-		PVRSRVReleasePrintfLock(&flags);
-		PVRSRVReleasePrintfLocked(
-			"PF-%s: idx=%u sz=%u off=%u hex=%s",
-			pszTag, ui32Index, ui32Size, ui32Offset, aszHex);
-		PVRSRVReleasePrintfUnlock(flags);
-		ui32Offset += ui32Chunk;
-	}
-}
-
 /*
  * One render contributes initial and post-geometry regions, PM, geometry
  * command, TA/3D/3D-PR commands and (if necessary) PB-truncation record per RT, plus up to
@@ -4479,6 +4453,7 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 #if defined(PF_ODYSSEY_CAPTURE)
 	IMG_BOOL bOdysseyCaptureThisKick = IMG_FALSE;
 	IMG_UINT64 ui64OdysseyKickId = 0;
+	IMG_UINT64 ui64OdysseyDirectId = 0;
 	IMG_UINT32 ui32OdysseyDirectIdx = 0;
 	IMG_BYTE *pui8OdysseyTACmd = NULL;
 	IMG_BYTE *pui8Odyssey3DCmd = NULL;
@@ -4563,23 +4538,30 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 
 #if defined(PF_ODYSSEY_CAPTURE)
 	/*
-	 * Bypass the selected-kick machinery for three command-bearing calls so
-	 * the firmware command bytes are visible even if capture publication fails.
+	 * Bypass the selected-kick snapshot machinery for two command-bearing calls.
+	 * Buffer the source parameters so the delayed-work ring drain, rather than
+	 * an inline print path, publishes the firmware command bytes.
 	 */
 	if (g_bOdysseyCapture && pui83DDMCmd && ui323DCmdSize)
 	{
 		ui32OdysseyDirectIdx = (IMG_UINT32)atomic_inc_return(
 			&g_iOdysseyDirect3DCalls);
-		if (ui32OdysseyDirectIdx <= 3U)
+		if (ui32OdysseyDirectIdx <= 2U)
 		{
-			_OdysseyLogDirectCmd("3DCMD", ui32OdysseyDirectIdx,
-				pui83DDMCmd, ui323DCmdSize);
+			ui64OdysseyDirectId = atomic64_inc_return(&g_ui64OdysseyId);
+			_OdysseyDumpFirmwareCmd("odyssey-3dcmd",
+				bAbort ? "ABORT" : "3D", ui64OdysseyDirectId,
+				pui83DDMCmd, ui323DCmdSize, bKickTA, bKickPR,
+				bKick3D, bUseCombined3DAnd3DPR);
 			if (pui8TADMCmd && ui32TACmdSize)
-				_OdysseyLogDirectCmd("TACMD", ui32OdysseyDirectIdx,
-					pui8TADMCmd, ui32TACmdSize);
+				_OdysseyDumpFirmwareCmd("odyssey-tacmd", "TA",
+					ui64OdysseyDirectId, pui8TADMCmd, ui32TACmdSize,
+					bKickTA, bKickPR, bKick3D, bUseCombined3DAnd3DPR);
 			if (pui83DPRDMCmd && ui323DPRCmdSize)
-				_OdysseyLogDirectCmd("3DPRCMD", ui32OdysseyDirectIdx,
-					pui83DPRDMCmd, ui323DPRCmdSize);
+				_OdysseyDumpFirmwareCmd("odyssey-3dprcmd", "3D_PR",
+					ui64OdysseyDirectId, pui83DPRDMCmd,
+					ui323DPRCmdSize, bKickTA, bKickPR, bKick3D,
+					bUseCombined3DAnd3DPR);
 		}
 	}
 #endif
