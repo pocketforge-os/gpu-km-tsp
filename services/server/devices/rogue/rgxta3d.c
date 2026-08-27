@@ -4420,6 +4420,7 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 	IMG_BOOL bUseSingleFWCommand = bKickTA && (bKickPR || bKick3D);
 #if defined(PF_ODYSSEY_CAPTURE)
 	IMG_BOOL bOdysseyCaptureThisKick = IMG_FALSE;
+	IMG_UINT64 ui64OdysseyKickId = 0;
 #endif
 
 	IMG_UINT32 ui32TACmdSizeTmp = 0, ui323DCmdSizeTmp = 0;
@@ -5667,11 +5668,7 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 		!psKMHWRTDataSet->bOdysseyFirstKickCaptured &&
 		psKMHWRTDataSet->ui64OdysseyCaptureId)
 	{
-		IMG_UINT64 ui64KickId = atomic64_inc_return(&g_ui64OdysseyId);
-
-		psKMHWRTDataSet->bOdysseyFirstKickCaptured = IMG_TRUE;
-		psKMHWRTDataSet->ui64OdysseyPostGeomId = ui64KickId;
-		psKMHWRTDataSet->ui32OdysseyPostGeomRetries = 0;
+		ui64OdysseyKickId = atomic64_inc_return(&g_ui64OdysseyId);
 		bOdysseyCaptureThisKick = IMG_TRUE;
 
 		PVR_DPF((PVR_DBG_MESSAGE,
@@ -5681,21 +5678,27 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 		PVR_ASSERT(ui32TACmdSize == 72U);
 		if (bKick3D && pui83DDMCmd)
 			PVR_ASSERT(ui323DCmdSize == sizeof(RGXFWIF_CMD3D));
-		if (bKickPR && pui83DPRDMCmd)
-			PVR_ASSERT(ui323DPRCmdSize == sizeof(RGXFWIF_CMD3D));
+		if (bKickPR && !bUseCombined3DAnd3DPR &&
+			(pui83DPRDMCmd || pui83DDMCmd))
+			PVR_ASSERT((pui83DPRDMCmd ? ui323DPRCmdSize : ui323DCmdSize) ==
+				sizeof(RGXFWIF_CMD3D));
 
 		if (bKickTA && pui8TADMCmd)
-			_OdysseyDumpFirmwareCmd("odyssey-tacmd", "TA", ui64KickId,
+			_OdysseyDumpFirmwareCmd("odyssey-tacmd", "TA", ui64OdysseyKickId,
 				pui8TADMCmd, ui32TACmdSize, bKickTA, bKickPR, bKick3D,
 				bUseCombined3DAnd3DPR);
 		if (bKick3D && pui83DDMCmd)
 			_OdysseyDumpFirmwareCmd("odyssey-3dcmd",
-				bAbort ? "ABORT" : "3D", ui64KickId,
+				bAbort ? "ABORT" : "3D", ui64OdysseyKickId,
 				pui83DDMCmd, ui323DCmdSize, bKickTA, bKickPR, bKick3D,
 				bUseCombined3DAnd3DPR);
-		if (bKickPR && pui83DPRDMCmd)
-			_OdysseyDumpFirmwareCmd("odyssey-3dprcmd", "3D_PR", ui64KickId,
-				pui83DPRDMCmd, ui323DPRCmdSize, bKickTA, bKickPR, bKick3D,
+		if (bKickPR && !bUseCombined3DAnd3DPR &&
+			(pui83DPRDMCmd || pui83DDMCmd))
+			_OdysseyDumpFirmwareCmd("odyssey-3dprcmd", "3D_PR",
+				ui64OdysseyKickId,
+				pui83DPRDMCmd ? pui83DPRDMCmd : pui83DDMCmd,
+				pui83DPRDMCmd ? ui323DPRCmdSize : ui323DCmdSize,
+				bKickTA, bKickPR, bKick3D,
 				bUseCombined3DAnd3DPR);
 	}
 #endif
@@ -6191,6 +6194,9 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 	/* Start polling as soon as the successful FW command is visible. */
 	if (bOdysseyCaptureThisKick)
 	{
+		psKMHWRTDataSet->bOdysseyFirstKickCaptured = IMG_TRUE;
+		psKMHWRTDataSet->ui64OdysseyPostGeomId = ui64OdysseyKickId;
+		psKMHWRTDataSet->ui32OdysseyPostGeomRetries = 0;
 		schedule_delayed_work(&psKMHWRTDataSet->sOdysseyPostGeomWork, 0);
 	}
 #endif
