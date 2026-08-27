@@ -112,6 +112,7 @@ static void _OdysseyLogDirectCmd(const IMG_CHAR *pszTag, IMG_UINT32 ui32Index,
 	IMG_UINT32 ui32Offset;
 	IMG_UINT32 ui32Byte;
 	IMG_UINT32 ui32Chunk;
+	unsigned long flags = 0;
 
 	for (ui32Offset = 0; ui32Offset < ui32Size; )
 	{
@@ -120,9 +121,11 @@ static void _OdysseyLogDirectCmd(const IMG_CHAR *pszTag, IMG_UINT32 ui32Index,
 			OSSNPrintf(&aszHex[ui32Byte * 2U], 3, "%02x",
 				pui8Cmd[ui32Offset + ui32Byte]);
 
-		PVR_DPF((PVR_DBG_ERROR,
+		PVRSRVReleasePrintfLock(&flags);
+		PVRSRVReleasePrintfLocked(
 			"PF-%s: idx=%u sz=%u off=%u hex=%s",
-			pszTag, ui32Index, ui32Size, ui32Offset, aszHex));
+			pszTag, ui32Index, ui32Size, ui32Offset, aszHex);
+		PVRSRVReleasePrintfUnlock(flags);
 		ui32Offset += ui32Chunk;
 	}
 }
@@ -4439,6 +4442,7 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 	IMG_UINT32				ui323DCmdCount=0;
 	IMG_UINT32				ui32TACmdOffset=0;
 	IMG_UINT32				ui323DCmdOffset=0;
+	unsigned long ulOdysseyDiagFlags = 0;
 	RGXFWIF_UFO				sPRUFO;
 	IMG_UINT32				i;
 	PVRSRV_ERROR			eError = PVRSRV_OK;
@@ -4549,11 +4553,13 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 	IMG_UINT32 ui32Client3DFenceCount = 0;
 
 	/* TEMP PF-ODYSSEY-KICK diagnostic — remove before merge */
-	PVR_DPF((PVR_DBG_ERROR,
+	PVRSRVReleasePrintfLock(&ulOdysseyDiagFlags);
+	PVRSRVReleasePrintfLocked(
 		"PF-ODYSSEY-KICK: TA=%px TA_sz=%u 3D=%px 3D_sz=%u 3DPR=%px 3DPR_sz=%u kickTA=%u kick3D=%u kickPR=%u abort=%u",
 		pui8TADMCmd, ui32TACmdSize, pui83DDMCmd, ui323DCmdSize,
 		pui83DPRDMCmd, ui323DPRCmdSize, bKickTA, bKick3D, bKickPR,
-		bAbort));
+		bAbort);
+	PVRSRVReleasePrintfUnlock(ulOdysseyDiagFlags);
 
 #if defined(PF_ODYSSEY_CAPTURE)
 	/*
