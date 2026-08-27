@@ -4451,6 +4451,10 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 #if defined(PF_ODYSSEY_CAPTURE)
 	IMG_BOOL bOdysseyCaptureThisKick = IMG_FALSE;
 	IMG_UINT64 ui64OdysseyKickId = 0;
+	IMG_BYTE *pui8OdysseyTACmd = NULL;
+	IMG_BYTE *pui8Odyssey3DCmd = NULL;
+	IMG_BYTE *pui8Odyssey3DPRCmd = NULL;
+	IMG_UINT32 ui32Odyssey3DPRCmdSize = 0;
 #endif
 
 	IMG_UINT32 ui32TACmdSizeTmp = 0, ui323DCmdSizeTmp = 0;
@@ -5707,25 +5711,46 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 		PVR_ASSERT(ui32TACmdSize == 72U);
 
 		if (bKickTA && pui8TADMCmd)
-			_OdysseyDumpFirmwareCmd("odyssey-tacmd", "TA", ui64OdysseyKickId,
-				pui8TADMCmd, ui32TACmdSize, bKickTA, bKickPR, bKick3D,
-				bUseCombined3DAnd3DPR);
-		if (bKick3D && pui83DDMCmd)
-			_OdysseyDumpFirmwareCmd("odyssey-3dcmd",
-				bAbort ? "ABORT" : "3D", ui64OdysseyKickId,
-				pui83DDMCmd, ui323DCmdSize, bKickTA, bKickPR, bKick3D,
-				bUseCombined3DAnd3DPR);
+		{
+			pui8OdysseyTACmd = OSAllocMem(ui32TACmdSize);
+			if (pui8OdysseyTACmd)
+				OSDeviceMemCopy(pui8OdysseyTACmd, pui8TADMCmd, ui32TACmdSize);
+		}
+		if ((bKick3D || bAbort) && pui83DDMCmd)
+		{
+			pui8Odyssey3DCmd = OSAllocMem(ui323DCmdSize);
+			if (pui8Odyssey3DCmd)
+				OSDeviceMemCopy(pui8Odyssey3DCmd, pui83DDMCmd, ui323DCmdSize);
+		}
 		if (bKickPR && !bUseCombined3DAnd3DPR &&
 			(pui83DPRDMCmd || pui83DDMCmd))
-			_OdysseyDumpFirmwareCmd("odyssey-3dprcmd", "3D_PR",
-				ui64OdysseyKickId,
-				pui83DPRDMCmd ? pui83DPRDMCmd : pui83DDMCmd,
-				pui83DPRDMCmd ? ui323DPRCmdSize : ui323DCmdSize,
-				bKickTA, bKickPR, bKick3D,
-				bUseCombined3DAnd3DPR);
-		if (bKickTA && pui8TADMCmd)
-			_OdysseyDumpGeomCmd(ui64OdysseyKickId,
-				pui8TADMCmd, ui32TACmdSize);
+		{
+			const IMG_BYTE *pui8PRCmd = pui83DPRDMCmd ?
+				pui83DPRDMCmd : pui83DDMCmd;
+
+			ui32Odyssey3DPRCmdSize = pui83DPRDMCmd ?
+				ui323DPRCmdSize : ui323DCmdSize;
+			pui8Odyssey3DPRCmd = OSAllocMem(ui32Odyssey3DPRCmdSize);
+			if (pui8Odyssey3DPRCmd)
+				OSDeviceMemCopy(pui8Odyssey3DPRCmd, pui8PRCmd,
+					ui32Odyssey3DPRCmdSize);
+		}
+
+		if ((bKickTA && pui8TADMCmd && !pui8OdysseyTACmd) ||
+			((bKick3D || bAbort) && pui83DDMCmd && !pui8Odyssey3DCmd) ||
+			(bKickPR && !bUseCombined3DAnd3DPR &&
+			 (pui83DPRDMCmd || pui83DDMCmd) && !pui8Odyssey3DPRCmd))
+		{
+			PVR_DPF((PVR_DBG_WARNING,
+				"PF-ODYSSEY: firmware command snapshot allocation failed; deferring first-kick capture"));
+			OSFreeMem(pui8OdysseyTACmd);
+			OSFreeMem(pui8Odyssey3DCmd);
+			OSFreeMem(pui8Odyssey3DPRCmd);
+			pui8OdysseyTACmd = NULL;
+			pui8Odyssey3DCmd = NULL;
+			pui8Odyssey3DPRCmd = NULL;
+			bOdysseyCaptureThisKick = IMG_FALSE;
+		}
 	}
 #endif
 
@@ -6220,6 +6245,30 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 	/* Start polling as soon as the successful FW command is visible. */
 	if (bOdysseyCaptureThisKick)
 	{
+		if (pui8OdysseyTACmd)
+		{
+			_OdysseyDumpFirmwareCmd("odyssey-tacmd", "TA",
+				ui64OdysseyKickId, pui8OdysseyTACmd, ui32TACmdSize,
+				bKickTA, bKickPR, bKick3D, bUseCombined3DAnd3DPR);
+			_OdysseyDumpGeomCmd(ui64OdysseyKickId,
+				pui8OdysseyTACmd, ui32TACmdSize);
+		}
+		if (pui8Odyssey3DCmd)
+			_OdysseyDumpFirmwareCmd("odyssey-3dcmd",
+				bAbort ? "ABORT" : "3D", ui64OdysseyKickId,
+				pui8Odyssey3DCmd, ui323DCmdSize,
+				bKickTA, bKickPR, bKick3D, bUseCombined3DAnd3DPR);
+		if (pui8Odyssey3DPRCmd)
+			_OdysseyDumpFirmwareCmd("odyssey-3dprcmd", "3D_PR",
+				ui64OdysseyKickId, pui8Odyssey3DPRCmd,
+				ui32Odyssey3DPRCmdSize, bKickTA, bKickPR, bKick3D,
+				bUseCombined3DAnd3DPR);
+		OSFreeMem(pui8OdysseyTACmd);
+		OSFreeMem(pui8Odyssey3DCmd);
+		OSFreeMem(pui8Odyssey3DPRCmd);
+		pui8OdysseyTACmd = NULL;
+		pui8Odyssey3DCmd = NULL;
+		pui8Odyssey3DPRCmd = NULL;
 		psKMHWRTDataSet->bOdysseyFirstKickCaptured = IMG_TRUE;
 		psKMHWRTDataSet->ui64OdysseyPostGeomId = ui64OdysseyKickId;
 		psKMHWRTDataSet->ui32OdysseyPostGeomRetries = 0;
@@ -6370,6 +6419,11 @@ fail_taattachcleanupctls:
 fail_3dacquirecmd:
 fail_3dcmdinit:
 fail_taacquirecmd:
+#if defined(PF_ODYSSEY_CAPTURE)
+	OSFreeMem(pui8OdysseyTACmd);
+	OSFreeMem(pui8Odyssey3DCmd);
+	OSFreeMem(pui8Odyssey3DPRCmd);
+#endif
 	SyncAddrListRollbackCheckpoints(psRenderContext->psDeviceNode, &psRenderContext->sSyncAddrListTAFence);
 	SyncAddrListRollbackCheckpoints(psRenderContext->psDeviceNode, &psRenderContext->sSyncAddrListTAUpdate);
 	SyncAddrListRollbackCheckpoints(psRenderContext->psDeviceNode, &psRenderContext->sSyncAddrList3DFence);
