@@ -105,13 +105,13 @@ static atomic64_t g_ui64OdysseyBytes = ATOMIC64_INIT(0);
 
 /*
  * One render contributes initial and post-geometry regions, PM, geometry
- * command and (if necessary) PB-truncation record per RT, plus up to
+ * command, TA/3D/3D-PR commands and (if necessary) PB-truncation record per RT, plus up to
  * ODYSSEY_PB_TILE_CAP PB records.
  * R23's VCE diagnostic remains an immediate log record and does not occupy
  * this buffered transport ring.
  */
 #define ODYSSEY_CAPTURE_RECORD_CAP \
-	((ODYSSEY_PB_TILE_CAP + 6U) * RGXMKIF_NUM_RTDATAS)
+	((ODYSSEY_PB_TILE_CAP + 9U) * RGXMKIF_NUM_RTDATAS)
 #define ODYSSEY_CAPTURE_META_MAX 1536U
 static DEFINE_MUTEX(g_sOdysseyCaptureLock);
 static IMG_CHAR *g_apszOdysseyRecords[ODYSSEY_CAPTURE_RECORD_CAP];
@@ -454,6 +454,27 @@ static void _OdysseyDumpGeomCmd(IMG_UINT64 ui64Id, const IMG_BYTE *pui8Cmd,
 		PVR_DPF((PVR_DBG_WARNING,
 			"PF-ODYSSEY: skip geom-cmd record id=%llu (emit failed)",
 			(unsigned long long)ui64Id));
+}
+
+static void _OdysseyDumpFirmwareCmd(const IMG_CHAR *pszKind,
+		const IMG_CHAR *pszCmdType, IMG_UINT64 ui64Id,
+		const IMG_BYTE *pui8Cmd, IMG_UINT32 ui32Bytes,
+		IMG_BOOL bKickTA, IMG_BOOL bKickPR, IMG_BOOL bKick3D,
+		IMG_BOOL bUseCombined3DAnd3DPR)
+{
+	IMG_CHAR aszKind[64];
+	IMG_CHAR aszMetadata[ODYSSEY_CAPTURE_META_MAX];
+
+	OSSNPrintf(aszKind, sizeof(aszKind), "kind=%s", pszKind);
+	OSSNPrintf(aszMetadata, sizeof(aszMetadata),
+		"kick_ta=%u kick_pr=%u kick_3d=%u combined_3d_pr=%u cmd_type=%s",
+		(IMG_UINT32)bKickTA, (IMG_UINT32)bKickPR, (IMG_UINT32)bKick3D,
+		(IMG_UINT32)bUseCombined3DAnd3DPR, pszCmdType);
+	if (!_OdysseyEmitPayload(aszKind, ui64Id, aszMetadata,
+		pui8Cmd, ui32Bytes))
+		PVR_DPF((PVR_DBG_WARNING,
+			"PF-ODYSSEY: skip %s record id=%llu (emit failed)",
+			pszKind, (unsigned long long)ui64Id));
 }
 
 static void _OdysseyResolveDumpForPID(IMG_UINT64 id, IMG_UINT32 rt,
@@ -5637,6 +5658,48 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 	}
 #endif
 
+#if defined(PF_ODYSSEY_CAPTURE)
+	/*
+	 * Snapshot the first captured kick after KM has patched CMDTA3D_SHARED,
+	 * but before the command helpers copy the firmware-visible bytes to a CCB.
+	 */
+	if (g_bOdysseyCapture && bKickTA && psKMHWRTDataSet &&
+		!psKMHWRTDataSet->bOdysseyFirstKickCaptured &&
+		psKMHWRTDataSet->ui64OdysseyCaptureId)
+	{
+		IMG_UINT64 ui64KickId = atomic64_inc_return(&g_ui64OdysseyId);
+
+		psKMHWRTDataSet->bOdysseyFirstKickCaptured = IMG_TRUE;
+		psKMHWRTDataSet->ui64OdysseyPostGeomId = ui64KickId;
+		psKMHWRTDataSet->ui32OdysseyPostGeomRetries = 0;
+		bOdysseyCaptureThisKick = IMG_TRUE;
+
+		PVR_DPF((PVR_DBG_MESSAGE,
+			"PF-ODYSSEY: firmware command sizes TA=%u (expected=72) 3D=%u 3DPR=%u RGXFWIF_CMD3D=%zu",
+			ui32TACmdSize, ui323DCmdSize, ui323DPRCmdSize,
+			sizeof(RGXFWIF_CMD3D)));
+		PVR_ASSERT(ui32TACmdSize == 72U);
+		if (bKick3D && pui83DDMCmd)
+			PVR_ASSERT(ui323DCmdSize == sizeof(RGXFWIF_CMD3D));
+		if (bKickPR && pui83DPRDMCmd)
+			PVR_ASSERT(ui323DPRCmdSize == sizeof(RGXFWIF_CMD3D));
+
+		if (bKickTA && pui8TADMCmd)
+			_OdysseyDumpFirmwareCmd("odyssey-tacmd", "TA", ui64KickId,
+				pui8TADMCmd, ui32TACmdSize, bKickTA, bKickPR, bKick3D,
+				bUseCombined3DAnd3DPR);
+		if (bKick3D && pui83DDMCmd)
+			_OdysseyDumpFirmwareCmd("odyssey-3dcmd",
+				bAbort ? "ABORT" : "3D", ui64KickId,
+				pui83DDMCmd, ui323DCmdSize, bKickTA, bKickPR, bKick3D,
+				bUseCombined3DAnd3DPR);
+		if (bKickPR && pui83DPRDMCmd)
+			_OdysseyDumpFirmwareCmd("odyssey-3dprcmd", "3D_PR", ui64KickId,
+				pui83DPRDMCmd, ui323DPRCmdSize, bKickTA, bKickPR, bKick3D,
+				bUseCombined3DAnd3DPR);
+	}
+#endif
+
 	/* Init and acquire to TA command if required */
 	if (bKickTA)
 	{
@@ -6126,15 +6189,8 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 
 #if defined(PF_ODYSSEY_CAPTURE)
 	/* Start polling as soon as the successful FW command is visible. */
-	if (g_bOdysseyCapture && bKickTA && psKMHWRTDataSet &&
-		!psKMHWRTDataSet->bOdysseyFirstKickCaptured &&
-		psKMHWRTDataSet->ui64OdysseyCaptureId)
+	if (bOdysseyCaptureThisKick)
 	{
-		psKMHWRTDataSet->bOdysseyFirstKickCaptured = IMG_TRUE;
-		psKMHWRTDataSet->ui64OdysseyPostGeomId =
-			atomic64_inc_return(&g_ui64OdysseyId);
-		psKMHWRTDataSet->ui32OdysseyPostGeomRetries = 0;
-		bOdysseyCaptureThisKick = IMG_TRUE;
 		schedule_delayed_work(&psKMHWRTDataSet->sOdysseyPostGeomWork, 0);
 	}
 #endif
