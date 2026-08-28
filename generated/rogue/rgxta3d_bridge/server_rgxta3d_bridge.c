@@ -42,6 +42,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 *******************************************************************************/
 
 #include <linux/uaccess.h>
+#include <asm/unaligned.h>
 
 #include "img_defs.h"
 
@@ -1826,6 +1827,25 @@ PVRSRVBridgeRGXKickTA3D2(IMG_UINT32 ui32DispatchTableEntry,
 			goto RGXKickTA3D2_exit;
 		}
 	}
+
+#if defined(PF_ODYSSEY_CAPTURE)
+	/*
+	 * UNCONDITIONAL canary + per-kick discriminator: proves the channel works
+	 * AND that this bridge is hit, and lets the coordinator pick the
+	 * single-RT 640x480 geom kick.
+	 */
+	PVRSRVReleasePrintfLocked("UMVAL-KICK size=%u extjob=%u mrt=%u",
+		psRGXKickTA3D2IN->ui32TACmdSize, psRGXKickTA3D2IN->ui32ExtJobRef,
+		psRGXKickTA3D2IN->ui32NumberOfMRTs);
+	if (psRGXKickTA3D2IN->ui32TACmdSize >= 0x70)
+	{
+		IMG_UINT32 word = get_unaligned_le32(ui8TACmdInt + 0x68);
+
+		PVRSRVReleasePrintfLocked("UMVAL TA size=%u extjob=%u mrt=%u word68=%08x VV=%02x",
+			psRGXKickTA3D2IN->ui32TACmdSize, psRGXKickTA3D2IN->ui32ExtJobRef,
+			psRGXKickTA3D2IN->ui32NumberOfMRTs, word, (word >> 8) & 0xff);
+	}
+#endif
 	if (psRGXKickTA3D2IN->ui323DPRCmdSize != 0)
 	{
 		ui83DPRCmdInt = (IMG_BYTE *) IMG_OFFSET_ADDR(pArrayArgsBuffer, ui32NextOffset);
