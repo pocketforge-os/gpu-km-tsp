@@ -1826,6 +1826,44 @@ PVRSRVBridgeRGXKickTA3D2(IMG_UINT32 ui32DispatchTableEntry,
 			goto RGXKickTA3D2_exit;
 		}
 	}
+
+#if defined(PF_ODYSSEY_CAPTURE)
+	{
+		static int iUMValDumpCount;
+		IMG_INT iUMValSeq = iUMValDumpCount++;
+		IMG_UINT32 i;
+
+		/*
+		 * Keep the proven-channel canary unconditional.  The first four TA
+		 * command inputs are also dumped byte-for-byte so a
+		 * BVNC-specific field can be located without trusting another DDK's
+		 * command layout.
+		 */
+		PVRSRVReleasePrintfLocked("UMVAL-KICK size=%u extjob=%u mrt=%u",
+			psRGXKickTA3D2IN->ui32TACmdSize,
+			psRGXKickTA3D2IN->ui32ExtJobRef,
+			psRGXKickTA3D2IN->ui32NumberOfMRTs);
+
+		{
+			IMG_CHAR szUMValHex[160];
+			static const IMG_CHAR hx[] = "0123456789abcdef";
+			IMG_UINT32 n = psRGXKickTA3D2IN->ui32TACmdSize;
+
+			if (n > 72)
+			{
+				n = 72;
+			}
+			for (i = 0; i < n; i++)
+			{
+				szUMValHex[i * 2] = hx[(ui8TACmdInt[i] >> 4) & 0xf];
+				szUMValHex[i * 2 + 1] = hx[ui8TACmdInt[i] & 0xf];
+			}
+			szUMValHex[n * 2] = '\0';
+			PVRSRVReleasePrintfLocked("UMVAL-HEX seq=%d size=%u %s",
+				iUMValSeq, psRGXKickTA3D2IN->ui32TACmdSize, szUMValHex);
+		}
+	}
+#endif
 	if (psRGXKickTA3D2IN->ui323DPRCmdSize != 0)
 	{
 		ui83DPRCmdInt = (IMG_BYTE *) IMG_OFFSET_ADDR(pArrayArgsBuffer, ui32NextOffset);
