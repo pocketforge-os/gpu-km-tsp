@@ -1826,6 +1826,35 @@ PVRSRVBridgeRGXKickTA3D2(IMG_UINT32 ui32DispatchTableEntry,
 			goto RGXKickTA3D2_exit;
 		}
 	}
+
+#if defined(PF_ODYSSEY_CAPTURE)
+	{
+		static int iUMValDumpCount;
+		IMG_INT iUMValSeq = iUMValDumpCount++;
+		IMG_UINT32 i;
+
+		/*
+		 * Keep the proven-channel canary unconditional.  The first four TA
+		 * command inputs are also dumped byte-for-byte so a
+		 * BVNC-specific field can be located without trusting another DDK's
+		 * command layout.
+		 */
+		PVRSRVReleasePrintfLocked("UMVAL-KICK size=%u extjob=%u mrt=%u",
+			psRGXKickTA3D2IN->ui32TACmdSize,
+			psRGXKickTA3D2IN->ui32ExtJobRef,
+			psRGXKickTA3D2IN->ui32NumberOfMRTs);
+
+		if (iUMValSeq < 4)
+		{
+			for (i = 0; i < psRGXKickTA3D2IN->ui32TACmdSize; i++)
+			{
+				PVRSRVReleasePrintfLocked(
+					"UMVAL-HEX seq=%d off=%u b=%02x",
+					iUMValSeq, i, (IMG_UINT8)ui8TACmdInt[i]);
+			}
+		}
+	}
+#endif
 	if (psRGXKickTA3D2IN->ui323DPRCmdSize != 0)
 	{
 		ui83DPRCmdInt = (IMG_BYTE *) IMG_OFFSET_ADDR(pArrayArgsBuffer, ui32NextOffset);
