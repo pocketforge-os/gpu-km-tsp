@@ -2,11 +2,11 @@
 #
 # Trigger: pull_request to main
 # Runner:  hosted (ubuntu-latest)
-# Purpose: build pvrsrvkm.ko + dc_sunxi.ko against pinned kernel-tsp headers;
+# Purpose: build pvrsrvkm.ko + dc_sunxi.ko against pinned kernel-sunxi-4.9 headers;
 #          verify compile succeeds. Required check for branch protection.
 #
-# The build needs a configured kernel-tsp tree for headers. Since kernel-tsp
-# has no releases yet, we clone + prepare it from source. Once kernel-tsp
+# The build needs a configured kernel-sunxi-4.9 tree for headers. Since kernel-sunxi-4.9
+# has no releases yet, we clone + prepare it from source. Once kernel-sunxi-4.9
 # publishes release artifacts, this can switch to downloading a pre-built
 # headers tarball for speed.
 #
@@ -71,13 +71,14 @@ jobs:
       - name: Verify toolchain
         run: ${CROSS_COMPILE}gcc --version | head -1
 
-      - name: Clone kernel-tsp
+      - name: Clone kernel-sunxi-4.9
         run: |
-          git clone --depth=1 https://github.com/pocketforge-os/kernel-tsp.git \
-            /tmp/kernel-tsp
+          git clone --depth=1 --branch device/a133 \
+            https://github.com/pocketforge-os/kernel-sunxi-4.9.git \
+            /tmp/kernel-sunxi-4.9
 
       - name: Prepare kernel headers
-        working-directory: /tmp/kernel-tsp
+        working-directory: /tmp/kernel-sunxi-4.9
         run: |
           set -eux
           make ARCH=arm64 CROSS_COMPILE=${CROSS_COMPILE} pocketforge_tsp_defconfig
@@ -87,7 +88,7 @@ jobs:
       - name: Build GPU modules
         run: |
           set -eux
-          ./build-sunxi-a133.sh /tmp/kernel-tsp
+          ./build-sunxi-a133.sh /tmp/kernel-sunxi-4.9
 
       - name: Verify artifacts exist
         run: |
@@ -104,7 +105,7 @@ jobs:
       - name: Verify vermagic matches kernel
         run: |
           set -eux
-          KERNEL_VERSION=$(make -sC /tmp/kernel-tsp ARCH=arm64 kernelrelease)
+          KERNEL_VERSION=$(make -sC /tmp/kernel-sunxi-4.9 ARCH=arm64 kernelrelease)
           KO_VERMAGIC=$(modinfo pvrsrvkm.ko | grep vermagic | awk '{print $2}')
           echo "Kernel version: ${KERNEL_VERSION}"
           echo "Module vermagic: ${KO_VERMAGIC}"

@@ -31,7 +31,7 @@ hwdefs: no changes (upstream import)
 Before submitting a PR, verify the module builds:
 
 ```sh
-# Inside the pocketforge/build container, with kernel-tsp at /work/kernel:
+# Inside the pocketforge/build container, with kernel-sunxi-4.9 at /work/kernel:
 make -C /work/kernel \
   M=/work/gpu \
   ARCH=arm64 \
