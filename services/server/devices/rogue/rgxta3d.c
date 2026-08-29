@@ -2014,6 +2014,52 @@ PVRSRV_ERROR RGXCreateHWRTDataSet(CONNECTION_DATA      *psConnection,
 	psHWRTDataCommon->ui32ISPMergeScaleY = ui32ISPMergeScaleY;
 	psHWRTDataCommon->uiRgnHeaderSize			= uiRgnHeaderSize;
 	psHWRTDataCommon->ui32ISPMtileSize		= ui32ISPMtileSize;
+#if defined(PF_ODYSSEY_CAPTURE)
+	/* CLOSED HWRTDATA_COMMON ground truth — labeled field dump for open-vs-closed diff */
+	if (g_bOdysseyCapture)
+	{
+		IMG_CHAR *pszRecord = OSAllocMem(1024U);
+
+		if (pszRecord)
+		{
+			OSSNPrintf(pszRecord, 1024U,
+				"<<<PF-HWRTC-CLOSED ta_caches_need_zeroing=0x%x screen_pixel_max=0x%x "
+				"multi_sample_ctl=0x%llx flipped_multi_sample_ctl=0x%llx "
+				"tpc_stride=0x%x tpc_size=0x%x te_screen=0x%x mtile_stride=0x%x "
+				"te_aa=0x%x te_mtile1=0x%x te_mtile2=0x%x "
+				"isp_merge_lower_x=0x%x isp_merge_lower_y=0x%x "
+				"isp_merge_upper_x=0x%x isp_merge_upper_y=0x%x "
+				"isp_merge_scale_x=0x%x isp_merge_scale_y=0x%x "
+				"rgn_header_size=0x%x isp_mtile_size=0x%x>>>\n",
+				psHWRTDataCommon->bTACachesNeedZeroing,
+				psHWRTDataCommon->ui32ScreenPixelMax,
+				(unsigned long long)psHWRTDataCommon->ui64MultiSampleCtl,
+				(unsigned long long)psHWRTDataCommon->ui64FlippedMultiSampleCtl,
+				psHWRTDataCommon->ui32TPCStride,
+				psHWRTDataCommon->ui32TPCSize,
+				psHWRTDataCommon->ui32TEScreen,
+				psHWRTDataCommon->ui32MTileStride,
+				psHWRTDataCommon->ui32TEAA,
+				psHWRTDataCommon->ui32TEMTILE1,
+				psHWRTDataCommon->ui32TEMTILE2,
+				psHWRTDataCommon->ui32ISPMergeLowerX,
+				psHWRTDataCommon->ui32ISPMergeLowerY,
+				psHWRTDataCommon->ui32ISPMergeUpperX,
+				psHWRTDataCommon->ui32ISPMergeUpperY,
+				psHWRTDataCommon->ui32ISPMergeScaleX,
+				psHWRTDataCommon->ui32ISPMergeScaleY,
+				psHWRTDataCommon->uiRgnHeaderSize,
+				psHWRTDataCommon->ui32ISPMtileSize);
+			_OdysseyBufferRecord(pszRecord);
+		}
+		else
+		{
+			mutex_lock(&g_sOdysseyCaptureLock);
+			g_ui32OdysseyDropped++;
+			mutex_unlock(&g_sOdysseyCaptureLock);
+		}
+	}
+#endif
 #if defined(PDUMP)
 	PDUMPCOMMENT(psDeviceNode, "Dump HWRTDataCommon");
 	DevmemPDumpLoadMem(psHWRTDataCommonFwMemDesc, 0, sizeof(*psHWRTDataCommon), PDUMP_FLAGS_CONTINUOUS);
