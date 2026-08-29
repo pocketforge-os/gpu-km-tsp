@@ -92,6 +92,194 @@ module_param_named(odyssey_capture, g_bOdysseyCapture, bool, 0600);
 MODULE_PARM_DESC(odyssey_capture, "Enable bounded ODYSSEY render-state capture");
 static atomic64_t g_ui64OdysseyId = ATOMIC64_INIT(0);
 static atomic64_t g_ui64OdysseyBytes = ATOMIC64_INIT(0);
+static atomic_t g_iOdysseyAllInOnce = ATOMIC_INIT(0);
+
+/*
+ * GE8300/DDK-1.19 fragment-command wire offsets.  These are the offsets
+ * checked by the matching single-BVNC client's rogue_fwif_cmd_frag ABI; the
+ * multi-BVNC KM deliberately exposes only CMDTA3D_SHARED as a C type.
+ */
+enum
+{
+	ODYSSEY_FRAG_CMD_BYTES = 480U,
+	ODYSSEY_FRAG_ISP_CTL_OFFSET = 68U,
+	ODYSSEY_FRAG_VIEW_IDX_OFFSET = 84U,
+	ODYSSEY_FRAG_SCISSOR_BASE_OFFSET = 112U,
+	ODYSSEY_FRAG_PBE_WORD0_OFFSET = 168U,
+	ODYSSEY_FRAG_FLAGS_OFFSET = 464U,
+	ODYSSEY_FRAG_EXECUTE_COUNT_OFFSET = 476U,
+};
+
+static IMG_UINT32 _OdysseyReadLE32(const IMG_UINT8 *pui8Bytes)
+{
+	return (IMG_UINT32)pui8Bytes[0] |
+		((IMG_UINT32)pui8Bytes[1] << 8) |
+		((IMG_UINT32)pui8Bytes[2] << 16) |
+		((IMG_UINT32)pui8Bytes[3] << 24);
+}
+
+static IMG_UINT64 _OdysseyReadLE64(const IMG_UINT8 *pui8Bytes)
+{
+	return (IMG_UINT64)_OdysseyReadLE32(pui8Bytes) |
+		((IMG_UINT64)_OdysseyReadLE32(pui8Bytes + 4U) << 32);
+}
+
+static void _OdysseyDumpAllIn(PVRSRV_RGXDEV_INFO *psDevInfo,
+		RGX_KM_HW_RT_DATASET *psDataSet, const IMG_UINT8 *pui8FragCmd,
+		IMG_UINT32 ui32FragCmdBytes, IMG_UINT32 ui32KickRenderTargetSize,
+		IMG_UINT32 ui32DrawCalls, IMG_UINT32 ui32Indices,
+		IMG_UINT32 ui32MRTs)
+{
+	RGXFWIF_HWRTDATA_COMMON *psCommonMapped;
+	RGXFWIF_HWRTDATA_COMMON sCommon;
+	RGXFWIF_HWRTDATA *psHWRTData;
+	PVRSRV_ERROR eError;
+	IMG_UINT32 ui32MaxRTs;
+	IMG_UINT32 ui32MTileX1, ui32MTileX2, ui32MTileX3;
+	IMG_UINT32 ui32MTileY1, ui32MTileY2, ui32MTileY3;
+	IMG_UINT32 ui32XTileMax, ui32YTileMax;
+	IMG_UINT32 ui32NumMTilesX, ui32NumMTilesY;
+	IMG_UINT32 ui32ISPTilesX, ui32ISPTilesY;
+	IMG_UINT64 ui64ScissorBase, ui64PBE0, ui64PBE1;
+	IMG_DEV_VIRTADDR sScissorDevVAddr;
+	PMR *psScissorPMR;
+	IMG_DEVMEM_OFFSET_T uiScissorOffset;
+	const IMG_CHAR *pszReason;
+	void *pvScissorMapped;
+	size_t uiScissorMappedBytes;
+	IMG_HANDLE hScissorPriv;
+	IMG_UINT8 aui8Scissor[8];
+	IMG_UINT32 ui32ScissorW0, ui32ScissorW1;
+	unsigned long ulFlags = 0;
+
+	if (atomic_read(&g_iOdysseyAllInOnce) != 0 ||
+		!psDataSet || !psDataSet->psHWRTDataCommonCookie ||
+		!psDataSet->psHWRTDataFwMemDesc ||
+		!psDataSet->psHWRTDataCommonCookie->psHWRTDataCommonFwMemDesc ||
+		!pui8FragCmd || ui32FragCmdBytes < ODYSSEY_FRAG_CMD_BYTES)
+		return;
+
+	/* HWRTDATA identifies a single-view render through sRTACtl.ui32MaxRTs. */
+	eError = DevmemAcquireCpuVirtAddr(psDataSet->psHWRTDataFwMemDesc,
+		(void **)&psHWRTData);
+	if (eError != PVRSRV_OK)
+		return;
+	ui32MaxRTs = psHWRTData->sRTACtl.ui32MaxRTs;
+	DevmemReleaseCpuVirtAddr(psDataSet->psHWRTDataFwMemDesc);
+	if (ui32MaxRTs != 1U)
+		return;
+
+	/* All tiling/screen inputs below are read from HWRTDATA_COMMON. */
+	eError = DevmemAcquireCpuVirtAddr(
+		psDataSet->psHWRTDataCommonCookie->psHWRTDataCommonFwMemDesc,
+		(void **)&psCommonMapped);
+	if (eError != PVRSRV_OK)
+		return;
+	OSDeviceMemCopy(&sCommon, psCommonMapped, sizeof(sCommon));
+	DevmemReleaseCpuVirtAddr(
+		psDataSet->psHWRTDataCommonCookie->psHWRTDataCommonFwMemDesc);
+
+	ui32MTileX1 = (sCommon.ui32TEMTILE1 >> 18) & 0x1ffU;
+	ui32MTileX2 = (sCommon.ui32TEMTILE1 >> 9) & 0x1ffU;
+	ui32MTileX3 = sCommon.ui32TEMTILE1 & 0x1ffU;
+	ui32MTileY1 = (sCommon.ui32TEMTILE2 >> 18) & 0x1ffU;
+	ui32MTileY2 = (sCommon.ui32TEMTILE2 >> 9) & 0x1ffU;
+	ui32MTileY3 = sCommon.ui32TEMTILE2 & 0x1ffU;
+	ui32XTileMax = sCommon.ui32TEScreen & 0x1ffU;
+	ui32YTileMax = (sCommon.ui32TEScreen >> 12) & 0x1ffU;
+	ui32ISPTilesX = (sCommon.ui32ISPMtileSize >> 16) & 0x3ffU;
+	ui32ISPTilesY = sCommon.ui32ISPMtileSize & 0x3ffU;
+	if (RGX_IS_FEATURE_SUPPORTED(psDevInfo, SIMPLE_INTERNAL_PARAMETER_FORMAT) &&
+		RGX_IS_FEATURE_VALUE_SUPPORTED(psDevInfo,
+			SIMPLE_PARAMETER_FORMAT_VERSION) &&
+		RGX_GET_FEATURE_VALUE(psDevInfo,
+			SIMPLE_PARAMETER_FORMAT_VERSION) == 1U)
+	{
+		ui32NumMTilesX = 1U;
+		ui32NumMTilesY = 1U;
+	}
+	else
+	{
+		ui32NumMTilesX = 4U;
+		ui32NumMTilesY = 4U;
+	}
+
+	/* Fragment-command fields are read at their fixed GE8300 wire offsets. */
+	ui64ScissorBase = _OdysseyReadLE64(
+		&pui8FragCmd[ODYSSEY_FRAG_SCISSOR_BASE_OFFSET]);
+	ui64PBE0 = _OdysseyReadLE64(
+		&pui8FragCmd[ODYSSEY_FRAG_PBE_WORD0_OFFSET]);
+	ui64PBE1 = _OdysseyReadLE64(
+		&pui8FragCmd[ODYSSEY_FRAG_PBE_WORD0_OFFSET + sizeof(IMG_UINT64)]);
+	if (ui64ScissorBase == 0U)
+		return;
+	sScissorDevVAddr.uiAddr = ui64ScissorBase;
+	eError = DevmemIntDiagAcquirePMR(sScissorDevVAddr,
+		sizeof(aui8Scissor), &psScissorPMR, &uiScissorOffset, &pszReason);
+	if (eError != PVRSRV_OK)
+		return;
+	eError = PMRAcquireKernelMappingData(psScissorPMR, uiScissorOffset,
+		sizeof(aui8Scissor), &pvScissorMapped, &uiScissorMappedBytes,
+		&hScissorPriv);
+	if (eError != PVRSRV_OK || uiScissorMappedBytes < sizeof(aui8Scissor))
+	{
+		if (eError == PVRSRV_OK)
+			PMRReleaseKernelMappingData(psScissorPMR, hScissorPriv);
+		PMRUnrefPMR(psScissorPMR);
+		return;
+	}
+	OSDeviceMemCopy(aui8Scissor, pvScissorMapped, sizeof(aui8Scissor));
+	PMRReleaseKernelMappingData(psScissorPMR, hScissorPriv);
+	PMRUnrefPMR(psScissorPMR);
+	ui32ScissorW0 = _OdysseyReadLE32(&aui8Scissor[0]);
+	ui32ScissorW1 = _OdysseyReadLE32(&aui8Scissor[4]);
+
+	if (atomic_cmpxchg(&g_iOdysseyAllInOnce, 0, 1) != 0)
+		return;
+
+	/*
+	 * Compact tuple schemas keep the one-line marker below the release-log
+	 * limit: tile=(x/y max, count, ISP count); mtile=(x/y count, x1/2/3,
+	 * y1/2/3, x/y tiles per mtile, stride); hw=(region size, TE AA,
+	 * MSAA, flipped MSAA, TPC stride/size, ISP merge lower/upper/scale);
+	 * scissor/PBE=(x0/x1/y0/y1); f=(fragment ctl/view/flags/execute/
+	 * frame/bytes); k=(kick render-target size/draws/indices/MRTs/RTA).
+	 */
+	PVRSRVReleasePrintfLock(&ulFlags);
+	PVRSRVReleasePrintfLocked("PF-ODY-ALLIN te_screen=%08x ppp_screen=%08x isp_mtile_size=%08x te_mtile1=%08x te_mtile2=%08x render=%ux%u tile(max/count/isp)=%u,%u/%u,%u/%u,%u mtile(n/x/y/per/stride)=%u,%u/%u,%u,%u/%u,%u,%u/%u,%u/%u hw(r/a/m/f/tp/mg)=%u,%08x,%016llx,%016llx/%u,%u/%x,%x,%x,%x,%x,%x scissor(x0/x1/y0/y1)=%u,%u,%u,%u pbe(x0/x1/y0/y1)=%u,%u,%u,%u f(c/v/fl/e/fr/b)=%08x,%u,%08x,%u,%u,%u k(r/d/i/m/a)=%u,%u,%u,%u,%u",
+		sCommon.ui32TEScreen, sCommon.ui32ScreenPixelMax,
+		sCommon.ui32ISPMtileSize, sCommon.ui32TEMTILE1,
+		sCommon.ui32TEMTILE2,
+		(sCommon.ui32ScreenPixelMax & 0x7fffU) + 1U,
+		((sCommon.ui32ScreenPixelMax >> 16) & 0x7fffU) + 1U,
+		ui32XTileMax, ui32YTileMax, ui32XTileMax + 1U,
+		ui32YTileMax + 1U, ui32ISPTilesX, ui32ISPTilesY,
+		ui32NumMTilesX, ui32NumMTilesY,
+		ui32MTileX1, ui32MTileX2, ui32MTileX3,
+		ui32MTileY1, ui32MTileY2, ui32MTileY3,
+		ui32MTileX1, ui32MTileY1, sCommon.ui32MTileStride,
+		sCommon.uiRgnHeaderSize, sCommon.ui32TEAA,
+		(unsigned long long)sCommon.ui64MultiSampleCtl,
+		(unsigned long long)sCommon.ui64FlippedMultiSampleCtl,
+		sCommon.ui32TPCStride, sCommon.ui32TPCSize,
+		sCommon.ui32ISPMergeLowerX, sCommon.ui32ISPMergeLowerY,
+		sCommon.ui32ISPMergeUpperX, sCommon.ui32ISPMergeUpperY,
+		sCommon.ui32ISPMergeScaleX, sCommon.ui32ISPMergeScaleY,
+		ui32ScissorW0 >> 16, ui32ScissorW0 & 0xffffU,
+		ui32ScissorW1 >> 16, ui32ScissorW1 & 0xffffU,
+		(IMG_UINT32)((ui64PBE0 >> 6) & 0x3fffU),
+		(IMG_UINT32)((ui64PBE1 >> 32) & 0x3fffU),
+		(IMG_UINT32)((ui64PBE1 >> 46) & 0x3fffU),
+		(IMG_UINT32)(ui64PBE1 & 0x3fffU),
+		_OdysseyReadLE32(&pui8FragCmd[ODYSSEY_FRAG_ISP_CTL_OFFSET]),
+		_OdysseyReadLE32(&pui8FragCmd[ODYSSEY_FRAG_VIEW_IDX_OFFSET]),
+		_OdysseyReadLE32(&pui8FragCmd[ODYSSEY_FRAG_FLAGS_OFFSET]),
+		_OdysseyReadLE32(&pui8FragCmd[ODYSSEY_FRAG_EXECUTE_COUNT_OFFSET]),
+		_OdysseyReadLE32(&pui8FragCmd[0]), ui32FragCmdBytes,
+		ui32KickRenderTargetSize, ui32DrawCalls, ui32Indices, ui32MRTs,
+		ui32MaxRTs);
+	PVRSRVReleasePrintfUnlock(ulFlags);
+}
 
 /*
  * One render contributes up to RGXMKIF_NUM_RTDATAS records of each capture
@@ -5620,6 +5808,12 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 	OSLockRelease(psRenderContext->hLock);
 
 #if defined(PF_ODYSSEY_CAPTURE)
+	if (g_bOdysseyCapture && bKick3D && !bAbort)
+		_OdysseyDumpAllIn(psDevInfo, psKMHWRTDataSet, pui83DDMCmd,
+			ui323DCmdSize, ui32RenderTargetSize,
+			ui32NumberOfDrawCalls, ui32NumberOfIndices,
+			ui32NumberOfMRTs);
+
 	if (g_bOdysseyCapture && psKMHWRTDataSet &&
 		!psKMHWRTDataSet->bOdysseyFirstKickCaptured &&
 		psKMHWRTDataSet->ui64OdysseyCaptureId)
