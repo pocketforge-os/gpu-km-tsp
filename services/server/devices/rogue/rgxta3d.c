@@ -84,6 +84,13 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #define ODYSSEY_CAPTURE_BOOT_BUDGET (1024U * 1024U)
 /* The Rogue Services VHeap table occupies one device page. */
 #define ODYSSEY_VHEAP_TABLE_BYTES (4U * 1024U)
+#if defined(PF_RGN4)
+#define ODYSSEY_RGN4_RECORD_BYTES 5U
+#define ODYSSEY_RGN4_TE_SCREEN_640X480 0x0001d027U
+#define ODYSSEY_RGN4_GRID_RECORDS (40U * 30U)
+#define ODYSSEY_RGN4_GRID_BYTES \
+	(ODYSSEY_RGN4_GRID_RECORDS * ODYSSEY_RGN4_RECORD_BYTES)
+#endif
 extern PVRSRV_ERROR DevmemIntDiagAcquirePMR(IMG_DEV_VIRTADDR sDevVAddr,
 		IMG_DEVMEM_SIZE_T uiSize, PMR **ppsPMR,
 		IMG_DEVMEM_OFFSET_T *puiPMROffset, const IMG_CHAR **ppszReason);
@@ -92,6 +99,9 @@ module_param_named(odyssey_capture, g_bOdysseyCapture, bool, 0600);
 MODULE_PARM_DESC(odyssey_capture, "Enable bounded ODYSSEY render-state capture");
 static atomic64_t g_ui64OdysseyId = ATOMIC64_INIT(0);
 static atomic64_t g_ui64OdysseyBytes = ATOMIC64_INIT(0);
+#if defined(PF_RGN4)
+static atomic_t g_sOdysseyRGN4Dumped = ATOMIC_INIT(0);
+#endif
 
 /*
  * One render contributes up to RGXMKIF_NUM_RTDATAS records of each capture
@@ -268,6 +278,84 @@ static void _OdysseyDump(PMR *pmr, IMG_DEVMEM_OFFSET_T off, IMG_UINT64 id,
 	_OdysseyBufferRecord(record);
 	OSFreeMem(b64); OSFreeMem(desc); crypto_free_shash(tfm);
 }
+
+#if defined(PF_RGN4)
+static void _OdysseyDumpRGN4(PMR *psPMR, IMG_DEVMEM_OFFSET_T uiOffset,
+		IMG_UINT32 ui32RT, IMG_UINT32 ui32HeaderCount,
+		IMG_UINT32 ui32TEScreen)
+{
+	static const IMG_UINT32 aui32Indices[] = {
+		704U, 705U, 708U, 709U, 706U, 707U, 710U, 711U
+	};
+	IMG_UINT8 aaui8Records[ARRAY_SIZE(aui32Indices)][ODYSSEY_RGN4_RECORD_BYTES];
+	IMG_UINT8 ui8PresentMask = 0;
+	PVRSRV_ERROR eError;
+	void *pvAddr;
+	size_t uiMapped;
+	IMG_HANDLE hPriv;
+	IMG_UINT32 i, j;
+	unsigned long ulFlags = 0;
+
+	/* TE_SCREEN stores inclusive 16px-region maxima: 39x29 means 40x30,
+	 * or 1200 SIPF-v1 records. uiRgnHeaderSize is a header count on SIPF-v1,
+	 * so the active span is 1200 * 5 = 6000 bytes and physical record N
+	 * begins at region base + N * 5.
+	 */
+	if (ui32RT != 0U || ui32TEScreen != ODYSSEY_RGN4_TE_SCREEN_640X480 ||
+		ui32HeaderCount != ODYSSEY_RGN4_GRID_RECORDS)
+		return;
+
+	eError = PMRAcquireKernelMappingData(psPMR, uiOffset,
+		ODYSSEY_RGN4_GRID_BYTES,
+		&pvAddr, &uiMapped, &hPriv);
+	if (eError != PVRSRV_OK || uiMapped < ODYSSEY_RGN4_GRID_BYTES)
+	{
+		if (eError == PVRSRV_OK)
+			PMRReleaseKernelMappingData(psPMR, hPriv);
+		return;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(aui32Indices); i++)
+	{
+		const IMG_UINT8 *pui8Record = (const IMG_UINT8 *)pvAddr +
+			aui32Indices[i] * ODYSSEY_RGN4_RECORD_BYTES;
+
+		OSDeviceMemCopy(aaui8Records[i], pui8Record,
+			ODYSSEY_RGN4_RECORD_BYTES);
+		for (j = 0; j < ODYSSEY_RGN4_RECORD_BYTES; j++)
+			ui8PresentMask |= (aaui8Records[i][j] != 0U ? 1U : 0U) << i;
+	}
+	PMRReleaseKernelMappingData(psPMR, hPriv);
+
+	if (atomic_cmpxchg(&g_sOdysseyRGN4Dumped, 0, 1) != 0)
+		return;
+
+	PVRSRVReleasePrintfLock(&ulFlags);
+	PVRSRVReleasePrintfLocked(
+		"PF-RGN4-VENDOR idx=704,705,708,709 "
+		"rec=%02x%02x%02x%02x%02x,%02x%02x%02x%02x%02x,"
+		"%02x%02x%02x%02x%02x,%02x%02x%02x%02x%02x "
+		"ctrl=706,707,710,711 "
+		"rec=%02x%02x%02x%02x%02x,%02x%02x%02x%02x%02x,"
+		"%02x%02x%02x%02x%02x,%02x%02x%02x%02x%02x "
+		"present_mask=0x%02x",
+		aaui8Records[0][0], aaui8Records[0][1], aaui8Records[0][2],
+		aaui8Records[0][3], aaui8Records[0][4], aaui8Records[1][0],
+		aaui8Records[1][1], aaui8Records[1][2], aaui8Records[1][3],
+		aaui8Records[1][4], aaui8Records[2][0], aaui8Records[2][1],
+		aaui8Records[2][2], aaui8Records[2][3], aaui8Records[2][4],
+		aaui8Records[3][0], aaui8Records[3][1], aaui8Records[3][2],
+		aaui8Records[3][3], aaui8Records[3][4], aaui8Records[4][0],
+		aaui8Records[4][1], aaui8Records[4][2], aaui8Records[4][3],
+		aaui8Records[4][4], aaui8Records[5][0], aaui8Records[5][1],
+		aaui8Records[5][2], aaui8Records[5][3], aaui8Records[5][4],
+		aaui8Records[6][0], aaui8Records[6][1], aaui8Records[6][2],
+		aaui8Records[6][3], aaui8Records[6][4], aaui8Records[7][0],
+		aaui8Records[7][1], aaui8Records[7][2], aaui8Records[7][3],
+		aaui8Records[7][4], ui8PresentMask);
+	PVRSRVReleasePrintfUnlock(ulFlags);
+}
+#endif
 
 static void _OdysseyDumpGeomCmd(IMG_UINT64 ui64Id, const IMG_BYTE *pui8Cmd,
 		IMG_UINT32 ui32Bytes)
@@ -5661,6 +5749,13 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 					psKMHWRTDataSet->ui32OdysseyISPMtileSize,
 					"boot-budget-exhausted");
 			}
+#if defined(PF_RGN4)
+			_OdysseyDumpRGN4(psKMHWRTDataSet->psOdysseyPMR,
+				psKMHWRTDataSet->uiOdysseyPMROffset,
+				psKMHWRTDataSet->ui32OdysseyRT,
+				psKMHWRTDataSet->ui32OdysseyRgnHeaderSize,
+				psKMHWRTDataSet->ui32OdysseyTEScreen);
+#endif
 		}
 		_OdysseyDumpVCE(psRenderContext->psDeviceNode->pvDevice,
 			psKMHWRTDataSet->sOdysseyVHeapDevVAddr, ui64KickId,
