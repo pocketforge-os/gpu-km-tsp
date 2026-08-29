@@ -84,7 +84,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #define ODYSSEY_CAPTURE_BOOT_BUDGET (1024U * 1024U)
 /* The Rogue Services VHeap table occupies one device page. */
 #define ODYSSEY_VHEAP_TABLE_BYTES (4U * 1024U)
-#if defined(PF_RGN4)
+#if defined(PF_ODYSSEY_CAPTURE)
 #define ODYSSEY_RGN4_RECORD_BYTES 5U
 #define ODYSSEY_RGN4_TE_SCREEN_640X480 0x0001d027U
 #define ODYSSEY_RGN4_GRID_RECORDS (40U * 30U)
@@ -99,7 +99,7 @@ module_param_named(odyssey_capture, g_bOdysseyCapture, bool, 0600);
 MODULE_PARM_DESC(odyssey_capture, "Enable bounded ODYSSEY render-state capture");
 static atomic64_t g_ui64OdysseyId = ATOMIC64_INIT(0);
 static atomic64_t g_ui64OdysseyBytes = ATOMIC64_INIT(0);
-#if defined(PF_RGN4)
+#if defined(PF_ODYSSEY_CAPTURE)
 static atomic_t g_sOdysseyRGN4Dumped = ATOMIC_INIT(0);
 #endif
 
@@ -279,7 +279,7 @@ static void _OdysseyDump(PMR *pmr, IMG_DEVMEM_OFFSET_T off, IMG_UINT64 id,
 	OSFreeMem(b64); OSFreeMem(desc); crypto_free_shash(tfm);
 }
 
-#if defined(PF_RGN4)
+#if defined(PF_ODYSSEY_CAPTURE)
 static void _OdysseyDumpRGN4(PMR *psPMR, IMG_DEVMEM_OFFSET_T uiOffset,
 		IMG_UINT32 ui32RT, IMG_UINT32 ui32HeaderCount,
 		IMG_UINT32 ui32TEScreen)
@@ -5749,7 +5749,7 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 					psKMHWRTDataSet->ui32OdysseyISPMtileSize,
 					"boot-budget-exhausted");
 			}
-#if defined(PF_RGN4)
+#if defined(PF_ODYSSEY_CAPTURE)
 			_OdysseyDumpRGN4(psKMHWRTDataSet->psOdysseyPMR,
 				psKMHWRTDataSet->uiOdysseyPMROffset,
 				psKMHWRTDataSet->ui32OdysseyRT,
