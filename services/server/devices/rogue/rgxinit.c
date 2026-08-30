@@ -893,6 +893,11 @@ static void RGX_MISRHandler_Main (void *pvData)
 	 */
 	RGXHWPerfDataStoreCB(psDeviceNode);
 
+#if defined(PF_ODYSSEY_CAPTURE)
+	/* An armed 3D checkpoint identifies a completed fragment kick. */
+	RGXOdysseyDumpISPHWVendorOn3DCompletion(psDevInfo);
+#endif
+
 	/* Inform other services devices that we have finished an operation */
 	PVRSRVNotifyCommandCompletion(psDeviceNode);
 
@@ -3735,6 +3740,10 @@ static void DevPart2DeInitRGX(PVRSRV_DEVICE_NODE *psDeviceNode)
 		psDeviceNode->hCmdCompNotify = NULL;
 	}
 #endif /* !NO_HARDWARE */
+
+#if defined(PF_ODYSSEY_CAPTURE)
+	RGXOdysseyISPHWVendorDeinit();
+#endif
 
 	/* Remove the device from the power manager */
 	PVRSRVRemovePowerDevice(psDeviceNode);

@@ -80,6 +80,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <linux/moduleparam.h>
 #include <linux/mutex.h>
 
+#include "power.h"
+#include "pvrsrv_sync_km.h"
+#include "sync_checkpoint.h"
+
 #define ODYSSEY_CAPTURE_MAX_RECORD (64U * 1024U)
 #define ODYSSEY_CAPTURE_BOOT_BUDGET (1024U * 1024U)
 /* The Rogue Services VHeap table occupies one device page. */
@@ -92,6 +96,118 @@ module_param_named(odyssey_capture, g_bOdysseyCapture, bool, 0600);
 MODULE_PARM_DESC(odyssey_capture, "Enable bounded ODYSSEY render-state capture");
 static atomic64_t g_ui64OdysseyId = ATOMIC64_INIT(0);
 static atomic64_t g_ui64OdysseyBytes = ATOMIC64_INIT(0);
+static atomic_t g_iOdysseyISPHWState = ATOMIC_INIT(0);
+static PSYNC_CHECKPOINT g_psOdysseyISPHW3DCompletion;
+
+enum
+{
+	ODYSSEY_ISPHW_UNARMED = 0,
+	ODYSSEY_ISPHW_ARMED,
+	ODYSSEY_ISPHW_DUMPED,
+};
+
+static IMG_BOOL _OdysseyIsGE8300(const PVRSRV_RGXDEV_INFO *psDevInfo)
+{
+	return psDevInfo->sDevFeatureCfg.ui32B == 22U &&
+		psDevInfo->sDevFeatureCfg.ui32V == 102U &&
+		psDevInfo->sDevFeatureCfg.ui32N == 54U &&
+		psDevInfo->sDevFeatureCfg.ui32C == 38U;
+}
+
+static void _OdysseyArmISPHWVendor(PVRSRV_RGXDEV_INFO *psDevInfo,
+		PSYNC_CHECKPOINT ps3DCompletion)
+{
+	if (!g_bOdysseyCapture || !ps3DCompletion ||
+		!_OdysseyIsGE8300(psDevInfo) ||
+		atomic_cmpxchg(&g_iOdysseyISPHWState,
+			ODYSSEY_ISPHW_UNARMED, ODYSSEY_ISPHW_ARMED) !=
+				ODYSSEY_ISPHW_UNARMED)
+		return;
+
+	if (SyncCheckpointTakeRef(ps3DCompletion) != PVRSRV_OK)
+	{
+		atomic_set(&g_iOdysseyISPHWState, ODYSSEY_ISPHW_UNARMED);
+		return;
+	}
+
+	WRITE_ONCE(g_psOdysseyISPHW3DCompletion, ps3DCompletion);
+
+	/* Close the race where this diagnostic kick completed before arming. */
+	RGXOdysseyDumpISPHWVendorOn3DCompletion(psDevInfo);
+}
+
+void RGXOdysseyDumpISPHWVendorOn3DCompletion(PVRSRV_RGXDEV_INFO *psDevInfo)
+{
+	static const IMG_UINT32 aui32Offsets[] = {
+		0x0f08U, 0x0f10U, 0x0f18U, 0x0f20U, 0x0f24U, 0x0f28U,
+		0x0f30U, 0x0f38U, 0x0f48U, 0x0f4cU, 0x0f80U, 0x0f88U,
+		0x0fd8U, 0x4070U, 0x4078U, 0x4080U, 0x4088U, 0x4090U,
+	};
+	IMG_UINT32 aui32Values[ARRAY_SIZE(aui32Offsets)];
+	PSYNC_CHECKPOINT ps3DCompletion;
+	PVRSRV_ERROR eError;
+	IMG_UINT32 i;
+	unsigned long ulFlags = 0;
+
+	if (atomic_read(&g_iOdysseyISPHWState) != ODYSSEY_ISPHW_ARMED)
+		return;
+
+	ps3DCompletion = READ_ONCE(g_psOdysseyISPHW3DCompletion);
+	if (!ps3DCompletion ||
+		SyncCheckpointIsErrored(ps3DCompletion,
+			PVRSRV_FENCE_FLAG_SUPPRESS_HWP_PKT) ||
+		!SyncCheckpointIsSignalled(ps3DCompletion,
+			PVRSRV_FENCE_FLAG_SUPPRESS_HWP_PKT))
+		return;
+
+	/* Keep active power management from closing the CR aperture mid-read. */
+	eError = PVRSRVPowerLock(psDevInfo->psDeviceNode);
+	if (eError != PVRSRV_OK)
+		return;
+	if (!PVRSRVIsDevicePowered(psDevInfo->psDeviceNode) ||
+		atomic_cmpxchg(&g_iOdysseyISPHWState,
+			ODYSSEY_ISPHW_ARMED, ODYSSEY_ISPHW_DUMPED) !=
+				ODYSSEY_ISPHW_ARMED)
+	{
+		PVRSRVPowerUnlock(psDevInfo->psDeviceNode);
+		return;
+	}
+
+	ps3DCompletion = xchg(&g_psOdysseyISPHW3DCompletion, NULL);
+	for (i = 0; i < ARRAY_SIZE(aui32Offsets); i++)
+		aui32Values[i] = OSReadHWReg32(psDevInfo->pvRegsBaseKM,
+			aui32Offsets[i]);
+	PVRSRVPowerUnlock(psDevInfo->psDeviceNode);
+	SyncCheckpointDropRef(ps3DCompletion);
+
+	/* 0xf00 is the write-only ISP_START trigger; do not read it. */
+	PVRSRVReleasePrintfLock(&ulFlags);
+	PVRSRVReleasePrintfLocked(
+		"PF-ISPHW-VENDOR 0xf08=0x%08x 0xf10=0x%08x "
+		"0xf18=0x%08x 0xf20=0x%08x 0xf24=0x%08x "
+		"0xf28=0x%08x 0xf30=0x%08x 0xf38=0x%08x "
+		"0xf48=0x%08x 0xf4c=0x%08x 0xf80=0x%08x "
+		"0xf88=0x%08x 0xfd8=0x%08x 0x4070=0x%08x "
+		"0x4078=0x%08x 0x4080=0x%08x 0x4088=0x%08x "
+		"0x4090=0x%08x",
+		aui32Values[0], aui32Values[1], aui32Values[2],
+		aui32Values[3], aui32Values[4], aui32Values[5],
+		aui32Values[6], aui32Values[7], aui32Values[8],
+		aui32Values[9], aui32Values[10], aui32Values[11],
+		aui32Values[12], aui32Values[13], aui32Values[14],
+		aui32Values[15], aui32Values[16], aui32Values[17]);
+	PVRSRVReleasePrintfUnlock(ulFlags);
+}
+
+void RGXOdysseyISPHWVendorDeinit(void)
+{
+	PSYNC_CHECKPOINT ps3DCompletion =
+		xchg(&g_psOdysseyISPHW3DCompletion, NULL);
+
+	atomic_set(&g_iOdysseyISPHWState, ODYSSEY_ISPHW_DUMPED);
+	if (ps3DCompletion)
+		SyncCheckpointDropRef(ps3DCompletion);
+}
 
 /*
  * One render contributes up to RGXMKIF_NUM_RTDATAS records of each capture
@@ -5620,6 +5736,10 @@ PVRSRV_ERROR PVRSRVRGXKickTA3DKM(RGX_SERVER_RENDER_CONTEXT	*psRenderContext,
 	OSLockRelease(psRenderContext->hLock);
 
 #if defined(PF_ODYSSEY_CAPTURE)
+	if (bKick3D && psUpdate3DSyncCheckpoint)
+		_OdysseyArmISPHWVendor(psRenderContext->psDeviceNode->pvDevice,
+			psUpdate3DSyncCheckpoint);
+
 	if (g_bOdysseyCapture && psKMHWRTDataSet &&
 		!psKMHWRTDataSet->bOdysseyFirstKickCaptured &&
 		psKMHWRTDataSet->ui64OdysseyCaptureId)

@@ -204,6 +204,8 @@ void RGXOdysseyCaptureRetain(RGX_KM_HW_RT_DATASET **pasDataSets,
 		IMG_UINT32 ui32RgnHeaderSize, IMG_UINT32 ui32TEMTILE1,
 		IMG_UINT32 ui32TEMTILE2, IMG_UINT32 ui32TEScreen,
 		IMG_UINT32 ui32ISPMtileSize, IMG_UINT64 ui64CaptureId);
+void RGXOdysseyDumpISPHWVendorOn3DCompletion(PVRSRV_RGXDEV_INFO *psDevInfo);
+void RGXOdysseyISPHWVendorDeinit(void);
 #endif
 
 struct _RGX_PMR_NODE_ {
