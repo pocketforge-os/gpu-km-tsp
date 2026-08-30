@@ -126,10 +126,11 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 /* Synthetic panel reported to the services/UM stack. No real hardware backs
  * this; the values only have to be internally consistent and non-degenerate
- * so the UM's WSEGL_InitialiseDisplay query gauntlet passes.
+ * so the UM's WSEGL_InitialiseDisplay query gauntlet passes. Keep this matched
+ * to the 640x480 open-render diagnostic when comparing live ISP registers.
  */
-#define DC_NULL_WIDTH		1280
-#define DC_NULL_HEIGHT		720
+#define DC_NULL_WIDTH		640
+#define DC_NULL_HEIGHT		480
 #define DC_NULL_REFRESH_HZ	60
 #define DC_NULL_DPI		160
 /* See DESIGN NOTES: 90 (B8G8R8X8) is UM-recognised; 89 (B8G8R8A8) is not. */
