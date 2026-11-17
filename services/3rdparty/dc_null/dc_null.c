@@ -116,6 +116,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/version.h>
 
 #include "kerneldisplay.h"
 #include "powervr/imgpixfmts.h"
@@ -163,7 +164,12 @@ void DC_NULL_GetInfo(IMG_HANDLE hDeviceData,
 {
 	PVR_UNREFERENCED_PARAMETER(hDeviceData);
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 2, 0))
+	/* Linux 7.2 removed strncpy(); strscpy_pad() keeps its zero padding. */
+	strscpy_pad(psDisplayInfo->szDisplayName, DRVNAME " 1", DC_NAME_SIZE);
+#else
 	strncpy(psDisplayInfo->szDisplayName, DRVNAME " 1", DC_NAME_SIZE);
+#endif
 	psDisplayInfo->szDisplayName[DC_NAME_SIZE - 1] = '\0';
 
 	psDisplayInfo->ui32MinDisplayPeriod	= 0;
