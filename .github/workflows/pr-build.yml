@@ -37,8 +37,15 @@ jobs:
     timeout-minutes: 30
 
     steps:
+      # Action refs MUST be pinned to a full 40-char commit SHA, never a `@v4`
+      # tag: the pocketforge-os org Actions policy is allowed_actions=selected
+      # with sha_pinning_required=true, and an unpinned tag ref makes GitHub
+      # reject the whole run at startup (conclusion=startup_failure, no jobs,
+      # no check runs, no logs) — every one of this workflow's first 61 runs
+      # died that way. Lint with pocketforge-automation scripts/pf-workflow-lint
+      # against config/actions-policy.json + config/action-pins.tsv.
       - name: Checkout gpu-km-tsp
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
       - name: Install host build dependencies
         run: |
@@ -48,7 +55,7 @@ jobs:
 
       - name: Cache ARM toolchain
         id: cache-toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0 (what `@v4` resolved to)
         with:
           path: /opt/arm-10.3-2021.07
           key: arm-toolchain-10.3-2021.07-${{ env.TOOLCHAIN_SHA256 }}
