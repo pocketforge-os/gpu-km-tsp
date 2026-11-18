@@ -54,6 +54,15 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #define SYS_RGX_DEV_NAME    "rgxsunxi"
 #endif
 
+/* The vendor (Allwinner 4.9) DT describes the GPU node as "img,gpu". The
+ * mainline sun50i-a100.dtsi that the 6.16+/7.x builds run against instead
+ * uses "allwinner,sun50i-a100-gpu", "img,img-rogue". Match the SoC-specific
+ * string; deliberately NOT the generic "img,img-rogue", because that is the
+ * compatible claimed by the in-tree drm/imagination (powervr.ko) driver,
+ * which cannot drive the stock UM DDK. Claiming it here would make both
+ * drivers match the same node and turn binding into a load-order race.
+ */
 #define SYS_RGX_OF_COMPATIBLE "img,gpu"
+#define SYS_RGX_OF_COMPATIBLE_2 "allwinner,sun50i-a100-gpu"
 
 #endif	/* !defined(__SYSINFO_H__) */

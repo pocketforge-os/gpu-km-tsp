@@ -285,6 +285,13 @@ static const struct of_device_id pvr_of_ids[] = {
 #if defined(SYS_RGX_OF_COMPATIBLE)
 	{ .compatible = SYS_RGX_OF_COMPATIBLE, },
 #endif
+/* Optional second compatible for systems whose DT was re-authored upstream
+ * (e.g. sunxi_a133 on the mainline sun50i-a100.dtsi). Undefined for every
+ * other system layer, so their match tables are unchanged.
+ */
+#if defined(SYS_RGX_OF_COMPATIBLE_2)
+	{ .compatible = SYS_RGX_OF_COMPATIBLE_2, },
+#endif
 	{},
 };
 

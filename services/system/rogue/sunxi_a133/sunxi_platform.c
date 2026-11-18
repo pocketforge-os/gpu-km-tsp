@@ -709,6 +709,7 @@ int sunxi_platform_init(struct device *dev)
 #if defined(CONFIG_OF)
 	struct resource *reg_res;
 	struct platform_device *pdev = to_platform_device(dev);
+	int irq;
 #endif /* defined(CONFIG_OF) */
 	unsigned int val, volt_val = 0;
 	char ic_version = 0;
@@ -734,12 +735,27 @@ int sunxi_platform_init(struct device *dev)
 	sunxi_data->reg_size = reg_res->end - reg_res->start + 1;
 	sunxi_data->dev = dev;
 
-	sunxi_data->irq_num = platform_get_irq_byname(pdev, "IRQGPU");
-	if (sunxi_data->irq_num < 0) {
-		dev_err(dev, "failed to get irq number from device tree");
-		err = -1;
+	/* The vendor (Allwinner 4.9) DT names the GPU interrupt "IRQGPU".
+	 * Mainline sun50i-a100.dtsi — what the 6.16+/7.x builds run against —
+	 * declares a single unnamed interrupt (no interrupt-names property),
+	 * so platform_get_irq_byname() returns -ENXIO there. Fall back to the
+	 * first interrupt, which is the GPU's on both DTs.
+	 *
+	 * Keep the result in a signed int while testing it: irq_num is u32, so
+	 * the previous "if (sunxi_data->irq_num < 0)" test was dead code and a
+	 * failed lookup silently handed 0xfffffffa to gsDevices[0].ui32IRQ.
+	 * Return the real errno instead of -1 so the value reaching
+	 * SysDevInit() (and hence the probe failure path) is diagnosable.
+	 */
+	irq = platform_get_irq_byname(pdev, "IRQGPU");
+	if (irq < 0)
+		irq = platform_get_irq(pdev, 0);
+	if (irq < 0) {
+		dev_err(dev, "failed to get irq number from device tree (%d)\n", irq);
+		err = irq;
 		goto err_free;
 	}
+	sunxi_data->irq_num = (u32)irq;
 #endif /* defined(CONFIG_OF) */
 	sunxi_data->regula = regulator_get_optional(dev, "gpu");
 	if (!IS_ERR_OR_NULL(sunxi_data->regula))
