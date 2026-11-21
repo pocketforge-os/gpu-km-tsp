@@ -47,12 +47,11 @@ grep -q "DCDisplayConfigurationRetired" "$DC_FILE" || fail missing_DCDisplayConf
 # Check fbdev binding
 grep -q "registered_fb\[0\]" "$DC_FILE" || fail missing_registered_fb_binding
 
-# Check CONFIG_FB guard
-grep -q "#if !defined(CONFIG_FB)" "$DC_FILE" || fail missing_CONFIG_FB_guard
+# Check CONFIG_DRM_FBDEV_EMULATION guard
+grep -q "#if !defined(CONFIG_DRM_FBDEV_EMULATION)" "$DC_FILE" || fail missing_CONFIG_DRM_FBDEV_EMULATION_guard
 
 # Check Kbuild.mk has required defines
 KBUILD_FILE="$HERE/services/3rdparty/dc_sun4i/Kbuild.mk"
-grep -q "DC_SUN4I_USE_SCREEN_BASE" "$KBUILD_FILE" || fail missing_DC_SUN4I_USE_SCREEN_BASE
 grep -q "DC_SUN4I_FORCE_XRGB8888" "$KBUILD_FILE" || fail missing_DC_SUN4I_FORCE_XRGB8888
 grep -q "dc_sun4i-y" "$KBUILD_FILE" || fail missing_dc_sun4i-y
 

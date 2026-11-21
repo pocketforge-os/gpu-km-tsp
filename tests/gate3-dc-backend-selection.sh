@@ -10,15 +10,16 @@ fail() { echo "FAIL gate3 reason=$1 ${2:-}"; exit 1; }
 
 BUILD_SCRIPT="$HERE/build-sunxi-a133.sh"
 
-# Check build script has CONFIG_FB detection
-grep -q 'grep -q.*CONFIG_FB.*autoconf.h' "$BUILD_SCRIPT" || fail missing_CONFIG_FB_detection
+# Check build script has DRM fbdev emulation detection
+grep -q 'HAS_DRM_FBDEV_EMU=.*grep.*CONFIG_DRM_FBDEV_EMULATION' "$BUILD_SCRIPT" || fail missing_DRM_FBDEV_EMULATION_detection
+grep -q 'HAS_LEGACY_FB=.*grep.*CONFIG_FB' "$BUILD_SCRIPT" || fail missing_legacy_FB_detection
 
 # Check build script has kernel version detection
 grep -q 'KERNEL_VERSION=.*kernelversion' "$BUILD_SCRIPT" || fail missing_kernel_version_detection
 grep -q 'KERNEL_MAJOR=.*cut -d.' "$BUILD_SCRIPT" || fail missing_kernel_major_extraction
 
-# Check build script selects dc_sun4i for kernel 6.x+
-grep -q 'KERNEL_MAJOR.*-ge 6' "$BUILD_SCRIPT" || fail missing_kernel_6_check
+# Check build script selects dc_sun4i for kernel 6.x+ with DRM fbdev emulation
+grep -q 'KERNEL_MAJOR.*-ge 6.*HAS_DRM_FBDEV_EMU.*-eq 1' "$BUILD_SCRIPT" || fail missing_kernel_6_drm_fbdev_check
 grep -q 'PVR_DC_SUN4I=.*:-1' "$BUILD_SCRIPT" || fail missing_dc_sun4i_default_for_6x
 
 # Check build script passes PVR_DC_SUN4I to make
@@ -37,17 +38,18 @@ grep -q 'mutually exclusive' "$MAKEFILE" || fail missing_mutual_exclusivity_doc
 grep -q 'dc_sun4i.ko' "$BUILD_SCRIPT" || fail missing_dc_sun4i.ko_output
 
 # Verify the logic flow in build script
-# 1. No CONFIG_FB -> dc_null
-grep -A10 'CONFIG_FB.*autoconf.h' "$BUILD_SCRIPT" | grep -q 'PVR_HEADLESS_NO_DC' || fail missing_dc_null_fallback
-grep -A10 'CONFIG_FB.*autoconf.h' "$BUILD_SCRIPT" | grep -q 'PVR_DC_NULL' || fail missing_dc_null_fallback
+# 1. No fbdev support at all -> dc_null
+grep -A10 'HAS_DRM_FBDEV_EMU.*-eq 0.*HAS_LEGACY_FB.*-eq 0' "$BUILD_SCRIPT" | grep -q 'PVR_HEADLESS_NO_DC' || fail missing_dc_null_fallback
+grep -A10 'HAS_DRM_FBDEV_EMU.*-eq 0.*HAS_LEGACY_FB.*-eq 0' "$BUILD_SCRIPT" | grep -q 'PVR_DC_NULL' || fail missing_dc_null_fallback
 
 # 2. CONFIG_FB + kernel 6.x+ -> dc_sun4i
 grep -A10 'KERNEL_MAJOR.*-ge 6' "$BUILD_SCRIPT" | grep -q 'PVR_DC_SUN4I' || fail missing_dc_sun4i_for_6x
 
 echo "PASS gate3 DC backend selection logic validated"
-echo "  CONFIG_FB detection: present"
+echo "  DRM fbdev emulation detection: present"
+echo "  Legacy CONFIG_FB detection: present"
 echo "  Kernel version detection: present"
-echo "  dc_sun4i for kernel 6.x+: present"
-echo "  dc_null fallback (no CONFIG_FB): present"
-echo "  dc_sunxi default (kernel <6): implicit (no special flag)"
+echo "  dc_sun4i for kernel 6.x+ with DRM fbdev: present"
+echo "  dc_null fallback (no fbdev): present"
+echo "  dc_sunxi default (kernel <6 or legacy FB): implicit (no special flag)"
 echo "  Mutual exclusivity: documented"

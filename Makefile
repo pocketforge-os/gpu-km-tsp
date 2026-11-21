@@ -182,6 +182,29 @@ $(PVRSRVKM_NAME)-y += $(foreach _m,$(INTERNAL_EXTRA_KBUILD_OBJECTS:.o=),$($(_m)-
 #obj-m += $(INTERNAL_KBUILD_OBJECTS)
 obj-$(CONFIG_DRM_IMG_ROGUE) += $(INTERNAL_KBUILD_OBJECTS)
 
+# Display Class backend selection: exactly one backend must be active.
+# Validate that conflicting overrides are rejected.
+#   - PVR_HEADLESS_NO_DC=1: no DC backend (headless GPU-only)
+#   - PVR_DC_NULL=1: dc_null backend
+#   - PVR_DC_SUN4I=1: dc_sun4i backend
+#   - none of above (default): dc_sunxi backend
+ifeq ($(PVR_SYSTEM),sunxi_a133)
+  # Reject conflicting explicit overrides
+  ifeq ($(PVR_HEADLESS_NO_DC),1)
+    ifeq ($(PVR_DC_NULL),1)
+      $(error ERROR: Conflicting DC backend selection: PVR_HEADLESS_NO_DC=1 and PVR_DC_NULL=1 are mutually exclusive)
+    endif
+    ifeq ($(PVR_DC_SUN4I),1)
+      $(error ERROR: Conflicting DC backend selection: PVR_HEADLESS_NO_DC=1 and PVR_DC_SUN4I=1 are mutually exclusive)
+    endif
+  endif
+  ifeq ($(PVR_DC_NULL),1)
+    ifeq ($(PVR_DC_SUN4I),1)
+      $(error ERROR: Conflicting DC backend selection: PVR_DC_NULL=1 and PVR_DC_SUN4I=1 are mutually exclusive)
+    endif
+  endif
+endif
+
 # dc_sunxi: fbdev-to-PVR-DC bridge (separate .ko, depends on pvrsrvkm).
 # It is a Linux *fbdev* display shim (uses registered_fb[], requires CONFIG_FB)
 # and is architecturally obsolete on a mainline kernel, whose A133 display path

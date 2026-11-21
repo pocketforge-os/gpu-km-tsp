@@ -7,14 +7,6 @@
 # Functionally equivalent to dc_sunxi but targets mainline sun4i-drm on Linux 7.2
 # rather than legacy sunxi disp on 4.9 BSP. Bead tsp-71fdd65791d8498f4d78.
 
-# DC_SUN4I_USE_SCREEN_BASE: sun4i-drm's fbdev emulation exposes the framebuffer
-# as a vmalloc'd virtual address in screen_base; fix.smem_start is NOT the address
-# the GPU needs. Without this define we hand the GPU smem_start+offset raw as a
-# physical address -> bad-bus-transaction async SError. The vendor dc_sunxi.ko
-# (BVNC 22.102.54.38) imports vmalloc_to_page + memstart_addr, proving it is built
-# with this define (page_to_phys(vmalloc_to_page()) path). Match it.
-ccflags-y += -DDC_SUN4I_USE_SCREEN_BASE
-
 # DC_SUN4I_FORCE_XRGB8888: report the 32-bit display surface to the GPU stack as
 # IMG_PIXFMT_B8G8R8X8_UNORM (90) instead of the default IMG_PIXFMT_B8G8R8A8_UNORM
 # (89). The closed UM render-target classifier (libGLESv2 0x78fe8 "number of

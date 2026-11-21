@@ -44,25 +44,31 @@ if [ ! -f "$KERNELDIR/include/generated/autoconf.h" ]; then
     exit 1
 fi
 
-# DC backend selection based on kernel version and CONFIG_FB:
-#   - No CONFIG_FB (mainline 6.x/7.x without fbdev): dc_null (headless)
-#   - CONFIG_FB + kernel 7.x+: dc_sun4i (sun4i-drm fbdev emulation)
-#   - CONFIG_FB + kernel 4.9: dc_sunxi (legacy sunxi disp fbdev)
+# DC backend selection based on kernel version and DRM fbdev prerequisites:
+#   - No CONFIG_DRM_FBDEV_EMULATION (mainline without fbdev emulation): dc_null (headless)
+#   - CONFIG_DRM_FBDEV_EMULATION + kernel 7.x+: dc_sun4i (sun4i-drm fbdev emulation)
+#   - CONFIG_DRM_FBDEV_EMULATION + kernel 4.9/5.x: dc_sunxi (legacy sunxi disp fbdev)
+#   - No CONFIG_DRM_FBDEV_EMULATION + kernel 4.9: dc_sunxi requires legacy CONFIG_FB
 # Explicit PVR_HEADLESS_NO_DC / PVR_DC_NULL / PVR_DC_SUN4I win.
-if ! grep -q '^#define CONFIG_FB 1$' "$KERNELDIR/include/generated/autoconf.h"; then
+AUTCONF_H="$KERNELDIR/include/generated/autoconf.h"
+HAS_DRM_FBDEV_EMU=$(grep -c '^#define CONFIG_DRM_FBDEV_EMULATION 1$' "$AUTCONF_H" 2>/dev/null || echo 0)
+HAS_LEGACY_FB=$(grep -c '^#define CONFIG_FB 1$' "$AUTCONF_H" 2>/dev/null || echo 0)
+
+if [ "$HAS_DRM_FBDEV_EMU" -eq 0 ] && [ "$HAS_LEGACY_FB" -eq 0 ]; then
+    # No fbdev support at all; use dc_null
     PVR_HEADLESS_NO_DC="${PVR_HEADLESS_NO_DC:-1}"
     PVR_DC_NULL="${PVR_DC_NULL:-1}"
 else
-    # CONFIG_FB is present; check kernel version to choose dc_sun4i vs dc_sunxi
+    # fbdev support present; check kernel version to choose dc_sun4i vs dc_sunxi
     KERNEL_VERSION=$(make -C "$KERNELDIR" kernelversion 2>/dev/null | head -n1)
     KERNEL_MAJOR=$(echo "$KERNEL_VERSION" | cut -d. -f1)
     
-    # Default to dc_sun4i for kernel 6.x+ (mainline with sun4i-drm)
-    # Keep dc_sunxi for 4.9/5.x (legacy BSP)
-    if [ "${KERNEL_MAJOR:-0}" -ge 6 ]; then
+    # Default to dc_sun4i for kernel 6.x+ with DRM fbdev emulation
+    # Keep dc_sunxi for 4.9/5.x (legacy BSP with CONFIG_FB)
+    if [ "${KERNEL_MAJOR:-0}" -ge 6 ] && [ "$HAS_DRM_FBDEV_EMU" -eq 1 ]; then
         PVR_DC_SUN4I="${PVR_DC_SUN4I:-1}"
     fi
-    # For kernel < 6, leave dc_sunxi as default (no special flag needed)
+    # For kernel < 6 or without DRM fbdev emulation, leave dc_sunxi as default
 fi
 
 echo "=== Building pvrsrvkm.ko for sunxi_a133 ==="

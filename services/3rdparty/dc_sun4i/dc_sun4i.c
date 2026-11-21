@@ -67,8 +67,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "powervr/imgpixfmts.h"
 #include "pvrmodule.h" /* for MODULE_LICENSE() */
 
-#if !defined(CONFIG_FB)
-#error dc_sun4i needs Linux framebuffer support. Enable CONFIG_FB in your kernel.
+#if !defined(CONFIG_DRM_FBDEV_EMULATION)
+#error dc_sun4i needs DRM fbdev emulation. Enable CONFIG_DRM_FBDEV_EMULATION in your kernel.
 #endif
 
 #define DRVNAME					"dc_sun4i"
@@ -120,7 +120,7 @@ void DC_SUN4I_GetInfo(IMG_HANDLE hDeviceData,
 {
 	PVR_UNREFERENCED_PARAMETER(hDeviceData);
 
-	strncpy(psDisplayInfo->szDisplayName, DRVNAME " 1", DC_NAME_SIZE);
+	strscpy(psDisplayInfo->szDisplayName, DRVNAME " 1", DC_NAME_SIZE);
 
 	psDisplayInfo->ui32MinDisplayPeriod	= 0;
 	psDisplayInfo->ui32MaxDisplayPeriod	= 1;
@@ -315,7 +315,7 @@ DC_SUN4I_ContextConfigureCheck(IMG_HANDLE hDisplayContext,
 		goto err_unlock;
 	}
 
-	if(psBuffer->ui32Width  != psVar->xres &&
+	if(psBuffer->ui32Width  != psVar->xres ||
 	   psBuffer->ui32Height != psVar->yres)
 	{
 		eError = PVRSRV_ERROR_DC_INVALID_BUFFER_DIMS;
@@ -534,11 +534,18 @@ PVRSRV_ERROR DC_SUN4I_BufferAcquire(IMG_HANDLE hBuffer,
 	uintptr_t uiStartAddr;
 	IMG_UINT32 i, ui32MaxLen;
 
-#if defined(DC_SUN4I_USE_SCREEN_BASE)
-	uiStartAddr = (uintptr_t)psDeviceData->psLINFBInfo->screen_base;
-#else
+	/* Linux 7.2's drm_fbdev_dma uses direct DMA mapping, not vmalloc.
+	 * fix.smem_start is the DMA/bus address of the framebuffer.
+	 * screen_base is a kernel virtual address mapping of the same buffer.
+	 * For direct DMA mapping, we use fix.smem_start as the physical address.
+	 */
 	uiStartAddr = psDeviceData->psLINFBInfo->fix.smem_start;
-#endif
+	
+	if (uiStartAddr == 0)
+	{
+		pr_err("dc_sun4i: fix.smem_start is 0; unsupported framebuffer mapping\n");
+		return PVRSRV_ERROR_NOT_SUPPORTED;
+	}
 
 	uiStartAddr += psBuffer->ui32BufferID * ui32ByteSize;
 	ui32MaxLen = psDeviceData->psLINFBInfo->fix.smem_len -
@@ -548,10 +555,6 @@ PVRSRV_ERROR DC_SUN4I_BufferAcquire(IMG_HANDLE hBuffer,
 	{
 		BUG_ON(i * PAGE_SIZE >= ui32MaxLen);
 		pasDevPAddr[i].uiAddr = uiStartAddr + (i * PAGE_SIZE);
-#if defined(DC_SUN4I_USE_SCREEN_BASE)
-		pasDevPAddr[i].uiAddr =
-			page_to_phys(vmalloc_to_page((void *)(uintptr_t)pasDevPAddr[i].uiAddr));
-#endif
 	}
 
 	/* We're UMA, so services will do the right thing and make
