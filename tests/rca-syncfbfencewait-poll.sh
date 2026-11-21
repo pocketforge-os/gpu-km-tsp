@@ -16,7 +16,9 @@
 #
 # Fail-closed: unmatched BEFORE/AFTER or malformed records -> disposition=malformed (exit 1).
 # Malformed: unexpected phase, non-numeric bridge_seq, wrong-length payloads
-#            (in_hex must be exactly 24 hex chars, out_hex exactly 8 hex chars).
+#            (in_hex must be exactly 24 hex chars, out_hex exactly 8 hex chars),
+#            wrong/missing/nonnumeric declared sizes (in_size must be 12 for BEFORE,
+#            out_size must be 4 for AFTER).
 # Read error: unreadable/missing evidence -> disposition=read_error (exit 1).
 #
 # IMG_HANDLE: full 64-bit little-endian decode from bridge struct bytes 0-7.
@@ -133,6 +135,25 @@ while IFS= read -r line; do
 
     if [ "$phase" = "before" ]; then
         echo "$seq" >> "$b_seqs"
+
+        # Validate declared in_size (must be present, numeric, exactly 12)
+        in_size=$(extract_field "in_size" "$line")
+        if [ -z "$in_size" ]; then
+            echo "MALFORMED before seq=$seq: missing in_size" >> "$errors"
+            malformed_count=$((malformed_count + 1))
+            continue
+        fi
+        if ! [[ "$in_size" =~ ^[0-9]+$ ]]; then
+            echo "MALFORMED before seq=$seq: nonnumeric in_size=$in_size" >> "$errors"
+            malformed_count=$((malformed_count + 1))
+            continue
+        fi
+        if [ "$in_size" -ne 12 ]; then
+            echo "MALFORMED before seq=$seq: in_size=$in_size (expected 12)" >> "$errors"
+            malformed_count=$((malformed_count + 1))
+            continue
+        fi
+
         in_hex=$(extract_field "in_hex" "$line")
         if [ -z "$in_hex" ] || [ "$in_hex" = "-" ]; then
             echo "MALFORMED before seq=$seq: missing in_hex" >> "$errors"
@@ -163,6 +184,25 @@ while IFS= read -r line; do
 
     elif [ "$phase" = "after" ]; then
         echo "$seq" >> "$a_seqs"
+
+        # Validate declared out_size (must be present, numeric, exactly 4)
+        out_size=$(extract_field "out_size" "$line")
+        if [ -z "$out_size" ]; then
+            echo "MALFORMED after seq=$seq: missing out_size" >> "$errors"
+            malformed_count=$((malformed_count + 1))
+            continue
+        fi
+        if ! [[ "$out_size" =~ ^[0-9]+$ ]]; then
+            echo "MALFORMED after seq=$seq: nonnumeric out_size=$out_size" >> "$errors"
+            malformed_count=$((malformed_count + 1))
+            continue
+        fi
+        if [ "$out_size" -ne 4 ]; then
+            echo "MALFORMED after seq=$seq: out_size=$out_size (expected 4)" >> "$errors"
+            malformed_count=$((malformed_count + 1))
+            continue
+        fi
+
         out_hex=$(extract_field "out_hex" "$line")
         if [ -z "$out_hex" ] || [ "$out_hex" = "-" ]; then
             echo "MALFORMED after seq=$seq: missing out_hex" >> "$errors"

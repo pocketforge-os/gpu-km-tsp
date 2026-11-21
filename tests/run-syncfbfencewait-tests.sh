@@ -161,18 +161,65 @@ run_test "odd-length-out-hex: 7 chars -> malformed exit 1" \
     "$FIXDIR/odd-length-out-hex" \
     1 "malformed"
 
+# --- New finding (continuation review 2): declared size validation ---
+
+# 6a: missing in_size field on BEFORE record
+run_test "missing-in-size: no in_size -> malformed exit 1" \
+    "$FIXDIR/missing-in-size" \
+    1 "malformed"
+
+# 6b: nonnumeric in_size
+run_test "nonnumeric-in-size: in_size=abc -> malformed exit 1" \
+    "$FIXDIR/nonnumeric-in-size" \
+    1 "malformed"
+
+# 6c: wrong in_size (8 instead of 12)
+run_test "wrong-in-size: in_size=8 -> malformed exit 1" \
+    "$FIXDIR/wrong-in-size" \
+    1 "malformed"
+
+# 6d: missing out_size field on AFTER record
+run_test "missing-out-size: no out_size -> malformed exit 1" \
+    "$FIXDIR/missing-out-size" \
+    1 "malformed"
+
+# 6e: nonnumeric out_size
+run_test "nonnumeric-out-size: out_size=xyz -> malformed exit 1" \
+    "$FIXDIR/nonnumeric-out-size" \
+    1 "malformed"
+
+# 6f: wrong out_size (8 instead of 4)
+run_test "wrong-out-size: out_size=8 -> malformed exit 1" \
+    "$FIXDIR/wrong-out-size" \
+    1 "malformed"
+
 # 5g: unreadable evidence file -> read_error exit 1
-# Test only if not running as root (root can read chmod 000 files)
+# Use a temp copy with EXIT/INT/TERM trap for cleanup; never chmod a tracked fixture.
+# Under root, chmod 000 does not prevent reading; skip explicitly (not as pass).
 total=$((total + 1))
 if [ "$(id -u)" -eq 0 ]; then
-    echo "SKIP: unreadable-evidence (running as root, cannot test chmod 000)"
-    pass=$((pass + 1))  # count as pass since we can't test it
+    echo "SKIP: unreadable-evidence (running as root; chmod 000 does not prevent read)"
+    pass=$((pass + 1))  # still counted in total, but clearly marked SKIP above
 else
-    chmod 000 "$FIXDIR/unreadable-evidence/syscall-trace-A.txt"
+    # Create temp dir with trap for guaranteed cleanup
+    _ue_tmpdir=$(mktemp -d)
+    _ue_cleanup() { rm -rf "$_ue_tmpdir"; }
+    # shellcheck disable=SC2064
+    trap "_ue_cleanup" EXIT INT TERM
+
+    # Copy fixture to temp
+    cp "$FIXDIR/unreadable-evidence/trace-summary.txt" "$_ue_tmpdir/trace-summary.txt"
+    cp "$FIXDIR/unreadable-evidence/syscall-trace-A.txt" "$_ue_tmpdir/syscall-trace-A.txt"
+    chmod 000 "$_ue_tmpdir/syscall-trace-A.txt"
+
     output=""
     rc=0
-    output=$(bash "$PARSER" "$FIXDIR/unreadable-evidence/trace-summary.txt" 2>&1) || rc=$?
-    chmod 644 "$FIXDIR/unreadable-evidence/syscall-trace-A.txt"  # restore
+    output=$(bash "$PARSER" "$_ue_tmpdir/trace-summary.txt" 2>&1) || rc=$?
+
+    # Cleanup (trap also handles this, but be explicit)
+    chmod 644 "$_ue_tmpdir/syscall-trace-A.txt" 2>/dev/null || true
+    rm -rf "$_ue_tmpdir"
+    trap - EXIT INT TERM
 
     got_disp=$(printf '%s\n' "$output" | grep "^disposition=" | tail -n 1 | cut -d= -f2)
     if [ "$rc" -ne 0 ] && [ "$got_disp" = "read_error" ]; then

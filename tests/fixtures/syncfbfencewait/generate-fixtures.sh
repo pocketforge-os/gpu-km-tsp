@@ -207,6 +207,75 @@ touch "$FIXDIR/odd-length-out-hex/trace-summary.txt"
 touch "$FIXDIR/unreadable-evidence/trace-summary.txt"
 # Note: chmod is done at test time, not here, to avoid issues if run as root
 
+# ============================================================
+# 16. missing-in-size: BEFORE record without in_size field
+# ============================================================
+mkdir -p "$FIXDIR/missing-in-size"
+{
+    seq=1
+    # Valid record first
+    before_line $seq "$(make_handle 1c)" "$ZERO_T"; after_line $seq "$OK"; seq=$((seq+1))
+    # Missing in_size
+    echo "pid=100 function=ioctl phase=before fd=5 bridge_seq=$seq bridge_id=24 bridge_func_id=5 out_size=4 in_hex=1c0000000000000000000000"
+} > "$FIXDIR/missing-in-size/syscall-trace-A.txt"
+touch "$FIXDIR/missing-in-size/trace-summary.txt"
+
+# ============================================================
+# 17. nonnumeric-in-size: BEFORE record with in_size=abc
+# ============================================================
+mkdir -p "$FIXDIR/nonnumeric-in-size"
+{
+    seq=1
+    before_line $seq "$(make_handle 1d)" "$ZERO_T"; after_line $seq "$OK"; seq=$((seq+1))
+    echo "pid=100 function=ioctl phase=before fd=5 bridge_seq=$seq bridge_id=24 bridge_func_id=5 in_size=abc out_size=4 in_hex=1d0000000000000000000000"
+} > "$FIXDIR/nonnumeric-in-size/syscall-trace-A.txt"
+touch "$FIXDIR/nonnumeric-in-size/trace-summary.txt"
+
+# ============================================================
+# 18. wrong-in-size: BEFORE record with in_size=8 (not 12)
+# ============================================================
+mkdir -p "$FIXDIR/wrong-in-size"
+{
+    seq=1
+    before_line $seq "$(make_handle 1e)" "$ZERO_T"; after_line $seq "$OK"; seq=$((seq+1))
+    echo "pid=100 function=ioctl phase=before fd=5 bridge_seq=$seq bridge_id=24 bridge_func_id=5 in_size=8 out_size=4 in_hex=1e0000000000000000000000"
+} > "$FIXDIR/wrong-in-size/syscall-trace-A.txt"
+touch "$FIXDIR/wrong-in-size/trace-summary.txt"
+
+# ============================================================
+# 19. missing-out-size: AFTER record without out_size field
+# ============================================================
+mkdir -p "$FIXDIR/missing-out-size"
+{
+    seq=1
+    before_line $seq "$(make_handle 1f)" "$ZERO_T"; after_line $seq "$OK"; seq=$((seq+1))
+    # Missing out_size
+    echo "pid=100 function=ioctl phase=after fd=5 bridge_seq=$seq bridge_id=24 bridge_func_id=5 in_size=12 out_hex=09000000"
+} > "$FIXDIR/missing-out-size/syscall-trace-A.txt"
+touch "$FIXDIR/missing-out-size/trace-summary.txt"
+
+# ============================================================
+# 20. nonnumeric-out-size: AFTER record with out_size=xyz
+# ============================================================
+mkdir -p "$FIXDIR/nonnumeric-out-size"
+{
+    seq=1
+    before_line $seq "$(make_handle 20)" "$ZERO_T"; after_line $seq "$OK"; seq=$((seq+1))
+    echo "pid=100 function=ioctl phase=after fd=5 bridge_seq=$seq bridge_id=24 bridge_func_id=5 in_size=12 out_size=xyz out_hex=09000000"
+} > "$FIXDIR/nonnumeric-out-size/syscall-trace-A.txt"
+touch "$FIXDIR/nonnumeric-out-size/trace-summary.txt"
+
+# ============================================================
+# 21. wrong-out-size: AFTER record with out_size=8 (not 4)
+# ============================================================
+mkdir -p "$FIXDIR/wrong-out-size"
+{
+    seq=1
+    before_line $seq "$(make_handle 21)" "$ZERO_T"; after_line $seq "$OK"; seq=$((seq+1))
+    echo "pid=100 function=ioctl phase=after fd=5 bridge_seq=$seq bridge_id=24 bridge_func_id=5 in_size=12 out_size=8 out_hex=09000000"
+} > "$FIXDIR/wrong-out-size/syscall-trace-A.txt"
+touch "$FIXDIR/wrong-out-size/trace-summary.txt"
+
 echo "Fixtures generated in $FIXDIR"
 for d in "$FIXDIR"/*/; do
     name=$(basename "$d")
