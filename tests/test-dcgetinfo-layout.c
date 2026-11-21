@@ -98,6 +98,20 @@ typedef struct PVRSRV_BRIDGE_OUT_DCGETINFO_TAG
 int main(void) {
     int failures = 0;
     
+    /* Test-only injection seam for negative testing of runner script.
+     * When DCGETINFO_TEST_INJECT_FAIL is set, force test failure to exercise
+     * the runner script's cleanup trap and failure reporting.
+     * This seam is fail-closed: only active when explicitly requested.
+     */
+    const char *inject_fail = getenv("DCGETINFO_TEST_INJECT_FAIL");
+    if (inject_fail && inject_fail[0] != '\0') {
+        printf("Testing PVRSRV_BRIDGE_OUT_DCGETINFO layout\n");
+        printf("============================================\n\n");
+        printf("INJECTION SEAM ACTIVE: Forcing test failure for negative testing.\n");
+        printf("DCGETINFO_TEST_INJECT_FAIL=%s\n\n", inject_fail);
+        return 1;
+    }
+    
     printf("Testing PVRSRV_BRIDGE_OUT_DCGETINFO layout\n");
     printf("============================================\n\n");
     
