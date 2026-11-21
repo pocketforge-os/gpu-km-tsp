@@ -27,44 +27,152 @@ KERNELDIR="${1:-$(cd "$HERE/../kernel-sunxi-7.x" && pwd)}"
 export CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
 NM="${CROSS_COMPILE}nm"
 
-# Bounded build concurrency: cap at 8 to avoid memory pressure
-# Validate PF_GATE1_JOBS: must be positive integer, capped at GATE1_MAX_JOBS (default 8)
-GATE1_MAX_JOBS="${GATE1_MAX_JOBS:-8}"
+# =====================================================================
+# Bounded build concurrency: hard finite maximum
+# =====================================================================
+# GATE1_HARD_MAX_JOBS is the IMMUTABLE hard ceiling. It cannot be raised
+# by the caller. This prevents runaway parallelism regardless of environment.
+GATE1_HARD_MAX_JOBS=8
+
+# resolve_jobs: side-effect-free helper that validates and caps concurrency.
+# Returns 0 on success (result in REPLY_JOBS), 1 on fatal validation error.
+# Sets REPLY_JOBS to an integer in [1, min(requested_cap, GATE1_HARD_MAX_JOBS)].
+# Distinguishes between "no argument" (use default) and "empty string" (fail).
+resolve_jobs() {
+	local requested_cap
+	local ncpu
+	ncpu=$(nproc)
+
+	# Apply hard ceiling to default (nproc)
+	local default_jobs
+	if [ "$ncpu" -gt "$GATE1_HARD_MAX_JOBS" ]; then
+		default_jobs=$GATE1_HARD_MAX_JOBS
+	else
+		default_jobs=$ncpu
+	fi
+
+	# No caller override: use bounded default
+	# Check if argument was provided at all (not just if it's empty)
+	if [ "$#" -eq 0 ]; then
+		REPLY_JOBS=$default_jobs
+		return 0
+	fi
+
+	# Argument was provided - validate it
+	requested_cap="$1"
+
+	# Validate: must be a positive integer (rejects nonnumeric, zero, negative, empty)
+	if ! [[ "$requested_cap" =~ ^[1-9][0-9]*$ ]]; then
+		return 1
+	fi
+
+	# Cap against hard maximum (caller can LOWER but never RAISE above hard ceiling)
+	if [ "$requested_cap" -gt "$GATE1_HARD_MAX_JOBS" ]; then
+		REPLY_JOBS=$GATE1_HARD_MAX_JOBS
+	else
+		REPLY_JOBS=$requested_cap
+	fi
+	return 0
+}
+
+# Resolve jobs (fatal on invalid input)
 if [ -n "${PF_GATE1_JOBS:-}" ]; then
-	# Validate: must be a positive integer
-	if ! [[ "$PF_GATE1_JOBS" =~ ^[1-9][0-9]*$ ]]; then
-		echo "FAIL gate1 reason=invalid_jobs PF_GATE1_JOBS=$PF_GATE1_JOBS (must be positive integer)" >&2
+	if ! resolve_jobs "$PF_GATE1_JOBS"; then
+		echo "FAIL gate1 reason=invalid_jobs PF_GATE1_JOBS=$PF_GATE1_JOBS (must be positive integer <= $GATE1_HARD_MAX_JOBS)" >&2
 		exit 1
 	fi
-	# Cap at maximum
-	if [ "$PF_GATE1_JOBS" -gt "$GATE1_MAX_JOBS" ]; then
-		echo "gate1: capping PF_GATE1_JOBS=$PF_GATE1_JOBS to max=$GATE1_MAX_JOBS" >&2
-		JOBS="$GATE1_MAX_JOBS"
-	else
-		JOBS="$PF_GATE1_JOBS"
-	fi
 else
-	# Default: min(nproc, GATE1_MAX_JOBS)
-	NCPU=$(nproc)
-	if [ "$NCPU" -gt "$GATE1_MAX_JOBS" ]; then
-		JOBS="$GATE1_MAX_JOBS"
-	else
-		JOBS="$NCPU"
+	if ! resolve_jobs; then
+		echo "FAIL gate1 reason=resolve_jobs_failed" >&2
+		exit 1
 	fi
 fi
+JOBS=$REPLY_JOBS
 
 START_TIME=$(date +%s)
 
-# Negative tests: validate job bounds without running full build
-# These tests ensure invalid input is rejected before any work starts
-if [ "${GATE1_TEST_JOBS_VALIDATION:-0}" = "1" ]; then
-	# Test invalid (non-numeric) PF_GATE1_JOBS
-	PF_GATE1_JOBS="abc" bash "$0" "${KERNELDIR:-}" 2>&1 | grep -q "invalid_jobs" && exit 0 || exit 1
-	# Test zero jobs
-	PF_GATE1_JOBS="0" bash "$0" "${KERNELDIR:-}" 2>&1 | grep -q "invalid_jobs" && exit 0 || exit 1
-	# Test negative jobs
-	PF_GATE1_JOBS="-1" bash "$0" "${KERNELDIR:-}" 2>&1 | grep -q "invalid_jobs" && exit 0 || exit 1
-	echo "PASS gate1 jobs validation tests"
+# =====================================================================
+# Validation mode: run all test cases, aggregate, single final exit
+# =====================================================================
+# GATE1_TEST_JOBS_VALIDATION=1 exercises resolve_jobs with various inputs
+# without starting any kernel build. It tests all advertised cases and
+# reports aggregate pass/fail. Cannot recurse (guarded by internal env flag).
+if [ "${GATE1_TEST_JOBS_VALIDATION:-0}" = "1" ] && [ "${_GATE1_VALIDATING:-0}" != "1" ]; then
+	export _GATE1_VALIDATING=1
+	test_pass=0
+	test_fail=0
+
+	run_case() {
+		local desc="$1" expect="$2" input="$3"
+		REPLY_JOBS=""
+		if resolve_jobs "$input"; then
+			actual="ok:$REPLY_JOBS"
+		else
+			actual="fail"
+		fi
+		if [ "$actual" = "$expect" ]; then
+			echo "  PASS: $desc (input='$input' -> $actual)"
+			test_pass=$((test_pass + 1))
+		else
+			echo "  FAIL: $desc (input='$input' expected=$expect got=$actual)" >&2
+			test_fail=$((test_fail + 1))
+		fi
+	}
+
+	echo "gate1: running jobs validation test suite"
+
+	# Non-numeric inputs -> must fail
+	run_case "nonnumeric" "fail" "abc"
+	run_case "empty_string" "fail" ""
+	run_case "spaces" "fail" "  "
+	run_case "float" "fail" "1.5"
+	run_case "hex" "fail" "0x10"
+	run_case "leading_plus" "fail" "+4"
+
+	# Zero and negative -> must fail
+	run_case "zero" "fail" "0"
+	run_case "negative" "fail" "-1"
+	run_case "negative_large" "fail" "-999"
+
+	# Valid values -> must succeed with correct result
+	run_case "valid_1" "ok:1" "1"
+	run_case "valid_4" "ok:4" "4"
+	run_case "valid_8" "ok:8" "8"
+	run_case "valid_16_large" "ok:$GATE1_HARD_MAX_JOBS" "16"
+
+	# Oversized -> capped to hard max
+	run_case "oversized_100" "ok:$GATE1_HARD_MAX_JOBS" "100"
+	run_case "oversized_9999" "ok:$GATE1_HARD_MAX_JOBS" "9999"
+
+	# No input -> bounded default (min(nproc, hard_max))
+	ncpu=$(nproc)
+	if [ "$ncpu" -gt "$GATE1_HARD_MAX_JOBS" ]; then
+		expected_default=$GATE1_HARD_MAX_JOBS
+	else
+		expected_default=$ncpu
+	fi
+	# Call with no arguments (not empty string) to test default behavior
+	REPLY_JOBS=""
+	if resolve_jobs; then
+		actual="ok:$REPLY_JOBS"
+	else
+		actual="fail"
+	fi
+	if [ "$actual" = "ok:$expected_default" ]; then
+		echo "  PASS: default_no_input (no args -> $actual)"
+		test_pass=$((test_pass + 1))
+	else
+		echo "  FAIL: default_no_input (no args expected=ok:$expected_default got=$actual)" >&2
+		test_fail=$((test_fail + 1))
+	fi
+
+	echo ""
+	echo "gate1: validation results: passed=$test_pass failed=$test_fail"
+	if [ "$test_fail" -gt 0 ]; then
+		echo "FAIL gate1 reason=jobs_validation_tests_failed"
+		exit 1
+	fi
+	echo "PASS gate1 jobs validation (all cases)"
 	exit 0
 fi
 
@@ -333,7 +441,7 @@ echo "    modules_symvers_sha256=$modules_symvers_sha256"
 echo "    final_module_symvers_sha256=$final_symvers_sha256"
 echo "    race_detection=passed"
 echo "    caller_tree_unmutated=true"
-echo "    build_jobs=$JOBS (max=$GATE1_MAX_JOBS)"
+echo "    build_jobs=$JOBS (hard_max=$GATE1_HARD_MAX_JOBS)"
 echo "    wall_time_seconds=$WALL_TIME"
 echo "  MODULES:"
 echo "    pvrsrvkm.ko: vermagic=$vm_pvrsrvkm sha256=$pvrsrvkm_sha256"

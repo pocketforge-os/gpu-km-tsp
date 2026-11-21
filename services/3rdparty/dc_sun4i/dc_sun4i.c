@@ -881,11 +881,19 @@ static bool DC_SUN4I_FlipPossible(struct fb_info *psLINFBInfo)
  *
  * bus_unregister_notifier() synchronizes with running callbacks; it must
  * NEVER be called while holding sFBLock, lock_fb_info, or console_lock.
+ *
+ * Returns: true if fb_release completed successfully (eFBState == FB_RELEASED)
+ *          false if release was not performed (terminal/unplugged or no claim)
+ *
+ * Caller MUST check return value: if false and psOwner is set, the caller
+ * must NOT call module_put(psOwner) to avoid unbalancing fb_open/fb_release.
+ * This intentionally leaks the module ref rather than risking lifetime corruption.
  */
-static void dc_sun4i_fb_release_once(DC_SUN4I_DEVICE *psDeviceData)
+static bool dc_sun4i_fb_release_once(DC_SUN4I_DEVICE *psDeviceData)
 {
 	struct fb_info *psLINFBInfo;
 	int drm_idx;
+	bool bReleased = false;
 
 	mutex_lock(&psDeviceData->sFBLock);
 
@@ -894,7 +902,7 @@ static void dc_sun4i_fb_release_once(DC_SUN4I_DEVICE *psDeviceData)
 	{
 		/* Already released, in progress, terminal, or never opened */
 		mutex_unlock(&psDeviceData->sFBLock);
-		return;
+		return false;
 	}
 	/* Claim: mark as in-progress before attempting release */
 	psDeviceData->eFBState = FB_RELEASE_IN_PROGRESS;
@@ -907,10 +915,13 @@ static void dc_sun4i_fb_release_once(DC_SUN4I_DEVICE *psDeviceData)
 		/* Device unplugged: cannot safely access fb_info.
 		 * Mark as terminal state (intentional, known limitation).
 		 * Do NOT set FB_RELEASED since fb_release was not called.
+		 * Return false so caller knows to preserve module ref.
 		 */
 		psDeviceData->eFBState = FB_RELEASE_TERMINAL;
 		mutex_unlock(&psDeviceData->sFBLock);
-		return;
+		pr_err("dc_sun4i: fb_release skipped (device unplugged), "
+		       "module ref intentionally leaked to avoid lifetime corruption");
+		return false;
 	}
 
 	/* Lock order: sFBLock (held) -> lock_fb_info -> console_lock */
@@ -927,8 +938,10 @@ static void dc_sun4i_fb_release_once(DC_SUN4I_DEVICE *psDeviceData)
 
 	/* Mark as successfully released AFTER fb_release completed */
 	psDeviceData->eFBState = FB_RELEASED;
+	bReleased = true;
 
 	mutex_unlock(&psDeviceData->sFBLock);
+	return bReleased;
 }
 
 /*
@@ -955,7 +968,10 @@ static int dc_sun4i_unbind_notifier(struct notifier_block *nb,
 		return NOTIFY_DONE;
 
 	pr_info("dc_sun4i: provider unbind detected, calling fb_release before teardown");
-	dc_sun4i_fb_release_once(psDeviceData);
+	/* Call shared helper - return value is informational only.
+	 * If release fails (terminal/unplugged), the exit path preserves module ref.
+	 */
+	(void)dc_sun4i_fb_release_once(psDeviceData);
 
 	return NOTIFY_OK;
 }
@@ -1137,7 +1153,11 @@ static int __init DC_SUN4I_init(void)
 	if(bus_register_notifier(&platform_bus_type, &gpsDeviceData->sUnbindNotifier) != 0)
 	{
 		pr_err("dc_sun4i: failed to register unbind notifier, cannot guarantee fb_release on unbind");
-		goto err_release_helper;
+		/* Notifier NOT registered - we still hold initial locks (drm_dev_enter,
+		 * lock_fb_info, console_lock). Do fb_release DIRECTLY to avoid race
+		 * between releasing locks and re-acquiring them in the helper.
+		 */
+		goto err_release_direct;
 	}
 	gpsDeviceData->bNotifierRegistered = true;
 	pr_info("dc_sun4i: registered platform-bus unbind notifier");
@@ -1174,22 +1194,54 @@ static int __init DC_SUN4I_init(void)
 	return 0;
 
 /*
+ * Error teardown after notifier registration failure (notifier NOT registered):
+ *   We still hold initial locks (drm_dev_enter, lock_fb_info, console_lock).
+ *   Do fb_release DIRECTLY to avoid race between releasing locks and
+ *   re-acquiring them in the helper (sun4i-drm could unbind concurrently).
+ *   Then clean up: release locks, free device data, balance refs.
+ */
+err_release_direct:
+	/* fb_release directly under current locks - no race window */
+	if(psLINFBInfo->fbops->fb_release)
+		psLINFBInfo->fbops->fb_release(psLINFBInfo, 0);
+	gpsDeviceData->eFBState = FB_RELEASED;
+	/* Release locks */
+	console_unlock();
+	unlock_fb_info(psLINFBInfo);
+	drm_dev_exit(init_drm_idx);
+	/* Clean up: no notifier to unregister */
+	put_device(&gpsDeviceData->psPlatformDev->dev);
+	kfree(gpsDeviceData);
+	module_put(psOwner);
+	drm_dev_put(psDRMDev);
+	return err;
+
+/*
  * Error teardown after fb_open succeeded (eFBState == FB_OPENED):
  *   1. Release initial locks (console_unlock, unlock_fb_info, drm_dev_exit)
  *   2. Call shared fb_release helper (re-enters DRM, takes locks, does fb_release)
  *   3. Unregister notifier if registered (synchronizes with running callbacks)
- *   4. Balance refs: put_device, kfree, module_put, drm_dev_put
+ *   4. Balance refs: put_device, kfree, module_put (only if release completed), drm_dev_put
+ *
+ *   Note: module_put is conditional on fb_release completion. If the helper
+ *   returns false (FB_RELEASE_TERMINAL), we intentionally leak the module ref.
  */
 err_release_helper:
 	console_unlock();
 	unlock_fb_info(psLINFBInfo);
 	drm_dev_exit(init_drm_idx);
-	dc_sun4i_fb_release_once(gpsDeviceData);
-	if(gpsDeviceData->bNotifierRegistered)
-		bus_unregister_notifier(&platform_bus_type, &gpsDeviceData->sUnbindNotifier);
-	put_device(&gpsDeviceData->psPlatformDev->dev);
-	kfree(gpsDeviceData);
-	module_put(psOwner);
+	{
+		bool bReleaseOk = dc_sun4i_fb_release_once(gpsDeviceData);
+		if(gpsDeviceData->bNotifierRegistered)
+			bus_unregister_notifier(&platform_bus_type, &gpsDeviceData->sUnbindNotifier);
+		put_device(&gpsDeviceData->psPlatformDev->dev);
+		kfree(gpsDeviceData);
+		/* Only module_put if fb_release completed successfully */
+		if(bReleaseOk || gpsDeviceData->eFBState != FB_RELEASE_TERMINAL)
+			module_put(psOwner);
+		else
+			pr_err("dc_sun4i: init unwind - module ref leaked (fb_release incomplete)");
+	}
 	drm_dev_put(psDRMDev);
 	return err;
 
@@ -1244,6 +1296,7 @@ static void __exit DC_SUN4I_exit(void)
 	DC_SUN4I_DEVICE *psDeviceData = gpsDeviceData;
 	struct drm_device *psDRMDev = psDeviceData->psDRMDev;
 	struct module *psOwner = psDeviceData->psOwner; /* cached, no stale fb_info deref */
+	bool bReleaseCompleted;
 
 	/* Stop PVR callbacks first */
 	DCUnregisterDevice(psDeviceData->hSrvHandle);
@@ -1256,7 +1309,7 @@ static void __exit DC_SUN4I_exit(void)
 	 * lock_fb_info/console_lock ordering, and exactly-once claim.
 	 * No sFBLock/fb_info/console locks held when this returns.
 	 */
-	dc_sun4i_fb_release_once(psDeviceData);
+	bReleaseCompleted = dc_sun4i_fb_release_once(psDeviceData);
 
 	/* Unregister notifier AFTER release is complete.
 	 * bus_unregister_notifier synchronizes with any running callback.
@@ -1269,8 +1322,28 @@ static void __exit DC_SUN4I_exit(void)
 		pr_info("dc_sun4i: unregistered platform-bus unbind notifier");
 	}
 
-	/* Balance all references */
-	module_put(psOwner); /* balanced with try_module_get in init */
+	/* Balance references.
+	 * SAFE UNRELEASE: if fb_release did NOT complete (FB_RELEASE_TERMINAL),
+	 * we intentionally leak the module reference rather than unbalance the
+	 * fb_open/fb_release pair. This avoids provider lifetime corruption.
+	 * The WARN documents this as an anomalous condition.
+	 */
+	if(bReleaseCompleted)
+	{
+		module_put(psOwner); /* balanced with try_module_get in init */
+	}
+	else if(psDeviceData->eFBState == FB_RELEASE_TERMINAL)
+	{
+		/* fb_release was not performed - preserve module ref intentionally */
+		pr_warn("dc_sun4i: module ref intentionally leaked (fb_release incomplete)");
+	}
+	/* FB_NONE or FB_RELEASED-without-claim: no fb_open was done, but we still
+	 * own the module ref from try_module_get. Release it.
+	 */
+	else
+	{
+		module_put(psOwner);
+	}
 
 	put_device(&psDeviceData->psPlatformDev->dev); /* balanced with get_device in init */
 

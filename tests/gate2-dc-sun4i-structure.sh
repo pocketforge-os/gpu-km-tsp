@@ -289,7 +289,7 @@ grep -q "dc_sun4i.ko" "$BUILD_SCRIPT" || fail missing_dc_sun4i.ko_in_build_scrip
 # Provider unbind notifier ensures fb_release runs before sun4i-drm teardown
 
 # 8a: Shared fb_release helper exists
-grep -q "static void dc_sun4i_fb_release_once" "$DC_FILE" || fail missing_fb_release_once_function
+grep -q "static bool dc_sun4i_fb_release_once" "$DC_FILE" || fail missing_fb_release_once_function
 
 # 8b: Notifier callback function exists and calls the shared helper
 grep -q "dc_sun4i_unbind_notifier" "$DC_FILE" || fail missing_unbind_notifier_function
@@ -329,7 +329,7 @@ if ! echo "$exit_block" | grep -q "dc_sun4i_fb_release_once"; then
 fi
 
 # 8g: dc_sun4i_fb_release_once holds sFBLock during lock_fb_info/console_lock
-helper_block=$(sed -n '/^static void dc_sun4i_fb_release_once/,/^}/p' "$DC_FILE")
+helper_block=$(sed -n '/^static bool dc_sun4i_fb_release_once/,/^}/p' "$DC_FILE")
 if ! echo "$helper_block" | grep -q "mutex_lock.*sFBLock"; then
 	fail helper_missing_mutex_lock "shared helper must take sFBLock"
 fi
@@ -379,12 +379,13 @@ if ! echo "$notifier_block" | grep -q "BUS_NOTIFY_UNBIND_DRIVER"; then
 	fail notifier_missing_unbind_action "notifier must handle BUS_NOTIFY_UNBIND_DRIVER"
 fi
 
-# 8m: Notifier registration failure must fail init (goto err_release_helper)
+# 8m: Notifier registration failure must fail init (goto err_release_direct)
+# Since notifier is not yet registered, we can do fb_release directly under held locks
 notifier_fail_block=$(echo "$init_block" | sed -n '/bus_register_notifier/,/^[[:space:]]*}$/p' | head -20)
-if echo "$notifier_fail_block" | grep -q "goto err_release_helper"; then
-	: # Good - notifier failure causes init to fail and do fb_release
+if echo "$notifier_fail_block" | grep -q "goto err_release_direct"; then
+	: # Good - notifier failure causes init to fail and do fb_release directly
 else
-	fail notifier_failure_not_fatal "bus_register_notifier failure must goto err_release_helper"
+	fail notifier_failure_not_fatal "bus_register_notifier failure must goto err_release_direct"
 fi
 
 # 8n: Negative mutation - exit must call dc_sun4i_fb_release_once BEFORE bus_unregister_notifier
@@ -437,12 +438,86 @@ grep -q "FB_RELEASE_IN_PROGRESS" "$DC_FILE" || fail missing_fb_state_in_progress
 grep -q "FB_RELEASED" "$DC_FILE" || fail missing_fb_state_released
 grep -q "FB_RELEASE_TERMINAL" "$DC_FILE" || fail missing_fb_state_terminal
 
+# 8u: Safe unrelease - shared helper must return bool (indicates release completion)
+if ! echo "$helper_block" | grep -q "bool.*dc_sun4i_fb_release_once"; then
+	fail helper_must_return_bool "shared helper must return bool indicating release completion"
+fi
+
+# 8v: Safe unrelease - helper must return false when FB_RELEASE_TERMINAL
+if ! echo "$helper_block" | grep -q "return false"; then
+	fail helper_must_return_false "helper must return false when drm_dev_enter fails (FB_RELEASE_TERMINAL)"
+fi
+
+# 8w: Safe unrelease - DC_SUN4I_exit must check helper return value
+exit_block=$(sed -n '/^static void __exit DC_SUN4I_exit/,/^}/p' "$DC_FILE")
+if ! echo "$exit_block" | grep -q "bReleaseCompleted.*=.*dc_sun4i_fb_release_once"; then
+	fail exit_must_check_helper_return "DC_SUN4I_exit must capture helper return value"
+fi
+
+# 8x: Safe unrelease - exit must conditionally call module_put based on release state
+# module_put must only be called when bReleaseCompleted is true or state is not FB_RELEASE_TERMINAL
+if ! echo "$exit_block" | grep -q "if(bReleaseCompleted)"; then
+	fail exit_must_conditional_module_put "DC_SUN4I_exit must conditionally call module_put based on release state"
+fi
+
+# 8y: Negative mutation - exit must NOT unconditionally call module_put after terminal state
+# The unconditional module_put would unbalance fb_open/fb_release
+unconditional_check=$(echo "$exit_block" | grep -c "module_put(psOwner)" || true)
+# Should have at most 2 occurrences (in if/else branches), not 1 unconditional
+if [ "$unconditional_check" -eq 1 ]; then
+	fail exit_unconditional_module_put "DC_SUN4I_exit must NOT unconditionally call module_put (check release state)"
+fi
+
+# 8z: Safe unrelease - exit must have WARN/error for FB_RELEASE_TERMINAL path
+if ! echo "$exit_block" | grep -qE "pr_warn.*module.*ref.*leaked|pr_err.*module.*ref.*leaked"; then
+	fail exit_must_warn_terminal_leak "DC_SUN4I_exit must warn/document intentional module ref leak on FB_RELEASE_TERMINAL"
+fi
+
+# =====================================================================
+# GATE1 BUILD BOUND STRUCTURAL TESTS
+# =====================================================================
+GATE1_FILE="$HERE/tests/gate1-km-7x-build.sh"
+[ -f "$GATE1_FILE" ] || fail gate1_script_missing
+
+# 9a: Hard finite build bound - GATE1_HARD_MAX_JOBS must be defined (immutable)
+if ! grep -q "GATE1_HARD_MAX_JOBS=" "$GATE1_FILE"; then
+	fail gate1_missing_hard_max "gate1 must define GATE1_HARD_MAX_JOBS as immutable hard ceiling"
+fi
+
+# 9b: Hard finite build bound - resolve_jobs helper function must exist
+if ! grep -q "resolve_jobs()" "$GATE1_FILE"; then
+	fail gate1_missing_resolve_helper "gate1 must define resolve_jobs() side-effect-free helper"
+fi
+
+# 9c: Hard finite build bound - helper must validate against hard max (not caller-controlled ceiling)
+if ! grep -q "GATE1_HARD_MAX_JOBS" "$GATE1_FILE"; then
+	fail gate1_helper_not_capped "resolve_jobs must cap against GATE1_HARD_MAX_JOBS"
+fi
+
+# 9d: Negative mutation - gate1 must NOT allow caller to raise above hard max
+# Check that PF_GATE1_JOBS is capped, not used directly to raise ceiling
+if grep -q 'GATE1_MAX_JOBS="${GATE1_MAX_JOBS:-' "$GATE1_FILE"; then
+	fail gate1_caller_can_raise "gate1 must NOT allow caller to raise max via GATE1_MAX_JOBS env var"
+fi
+
+# 9e: Validation mode - must run all test cases, not exit after first
+if ! grep -q "GATE1_TEST_JOBS_VALIDATION" "$GATE1_FILE"; then
+	fail gate1_missing_validation_mode "gate1 must support GATE1_TEST_JOBS_VALIDATION mode"
+fi
+
+# 9f: Validation mode - must aggregate results (test_pass/test_fail counters)
+if ! grep -q "test_pass" "$GATE1_FILE" || ! grep -q "test_fail" "$GATE1_FILE"; then
+	fail gate1_validation_no_aggregation "validation mode must aggregate all test results"
+fi
+
 echo "PASS gate2 dc_sun4i structure validated"
 echo "  dc_sun4i.c: $(wc -l < "$DC_FILE") lines"
 echo "  Kbuild.mk: $(wc -l < "$KBUILD_FILE") lines"
 echo "  DC API functions: 12/12 present"
 echo "  Lifecycle: teardown ordering, psOwner cached, discovery protected, success path verified"
-echo "  fb_release: shared helper with sFBLock serialization, exactly-once claim"
+echo "  fb_release: shared helper with sFBLock serialization, exactly-once claim, returns bool"
+echo "  Safe unrelease: conditional module_put in exit, no unbalance on FB_RELEASE_TERMINAL"
 echo "  Notifier: registered BEFORE publication, calls shared helper, fails closed"
-echo "  Exit: bus_unregister_notifier BEFORE shared helper, no lock held during unregister"
+echo "  Exit: release BEFORE notifier unregister, conditional module_put, WARN on terminal leak"
 echo "  Build integration: Makefile + build-sunxi-a133.sh"
+echo "  Gate1 bound: GATE1_HARD_MAX_JOBS immutable, resolve_jobs helper, validation mode"
