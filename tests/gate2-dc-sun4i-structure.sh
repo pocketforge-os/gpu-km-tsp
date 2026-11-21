@@ -171,6 +171,90 @@ if [ -n "$discovery_line" ]; then
 	fi
 fi
 
+# --- SUCCESS-PATH CONTROL-FLOW TESTS ---
+# Critical: the success path must NOT fall through to err_drm_put.
+# The drm_dev reference must be retained in gpsDeviceData until DC_SUN4I_exit.
+
+# Extract the init function
+init_block=$(awk '/^static int __init DC_SUN4I_init/,/^}/' "$DC_FILE")
+
+# Test 1: Verify success path ends with direct return 0, not goto
+# Look for the pattern: console_unlock(); unlock_fb_info(); drm_dev_exit(); return 0;
+# This sequence should appear BEFORE any error labels
+success_return_line=$(echo "$init_block" | grep -n "return 0;" | head -1 | cut -d: -f1)
+if [ -z "$success_return_line" ]; then
+	fail missing_success_return_0 "init must have direct 'return 0;' for success path"
+fi
+
+# Test 2: Verify err_drm_put label exists and is AFTER the success return
+err_drm_put_label_line=$(echo "$init_block" | grep -n "^err_drm_put:" | head -1 | cut -d: -f1)
+if [ -z "$err_drm_put_label_line" ]; then
+	fail missing_err_drm_put_label "err_drm_put label must exist for error paths"
+fi
+if [ "$success_return_line" -ge "$err_drm_put_label_line" ]; then
+	fail success_path_reaches_drm_put "return 0 at line $success_return_line must come BEFORE err_drm_put at line $err_drm_put_label_line"
+fi
+
+# Test 3: Verify the success path does NOT contain "goto err_drm_put" or "goto err_drm_exit"
+# Extract lines between "Found usable fbdev" (success path start) and "return 0;"
+success_path=$(echo "$init_block" | sed -n '/Found usable fbdev/,/return 0;/p')
+if echo "$success_path" | grep -q "goto err_drm_put\|goto err_drm_exit"; then
+	fail success_path_has_goto_drm "success path must not goto err_drm_put or err_drm_exit (must retain drm_dev ref)"
+fi
+
+# Test 4: Verify success path contains console_unlock, unlock_fb_info, drm_dev_exit (but NOT drm_dev_put)
+if ! echo "$success_path" | grep -q "console_unlock()"; then
+	fail success_path_missing_console_unlock "success path must release console lock"
+fi
+if ! echo "$success_path" | grep -q "unlock_fb_info("; then
+	fail success_path_missing_unlock_fb_info "success path must release fb_info lock"
+fi
+if ! echo "$success_path" | grep -q "drm_dev_exit("; then
+	fail success_path_missing_drm_dev_exit "success path must leave drm_dev_enter section"
+fi
+if echo "$success_path" | grep -q "drm_dev_put("; then
+	fail success_path_has_drm_dev_put "success path MUST NOT call drm_dev_put (reference retained for exit)"
+fi
+
+# Test 5: Negative mutation test - verify no code path after success can reach err_drm_put via fall-through
+# The success path ends with "return 0;" which exits the function, so no fall-through is possible
+# Verify that between "return 0;" and "err_kfree:" there is only whitespace/comments
+# Use awk to extract lines after "return 0;" and before "err_kfree:"
+between=$(echo "$init_block" | awk '/return 0;/{found=1; next} /^err_kfree:/{exit} found{print}')
+# Strip out multi-line comments, single-line comments, empty lines
+stripped=$(echo "$between" | sed '/\/\*/,/\*\//d' | sed '/^[[:space:]]*\/\//d' | sed '/^[[:space:]]*$/d' | sed '/^[[:space:]]*\*/d')
+if [ -n "$stripped" ]; then
+	fail success_path_has_fallthrough_code "unexpected code between 'return 0;' and error labels: $stripped"
+fi
+
+# Test 6: Verify error paths use correct goto targets
+# Validation errors should goto err_unlock (releases locks then falls through to drm_exit/drm_put)
+# DCRegisterDevice failure should goto err_kfree (frees device, then falls through)
+if ! echo "$init_block" | grep -q "goto err_kfree"; then
+	fail missing_goto_err_kfree "DCRegisterDevice failure must goto err_kfree"
+fi
+if ! echo "$init_block" | grep -q "goto err_unlock"; then
+	fail missing_goto_err_unlock "validation errors must goto err_unlock"
+fi
+
+# Test 7: Verify err_unlock falls through to err_drm_exit which falls through to err_drm_put
+# This ensures error paths correctly release ALL resources
+unlock_to_exit=$(echo "$init_block" | sed -n '/^err_unlock:/,/^err_drm_exit:/p')
+exit_to_put=$(echo "$init_block" | sed -n '/^err_drm_exit:/,/^err_drm_put:/p')
+put_to_out=$(echo "$init_block" | sed -n '/^err_drm_put:/,/^err_out:/p')
+if ! echo "$unlock_to_exit" | grep -q "console_unlock"; then
+	fail err_unlock_missing_console_unlock "err_unlock must release console lock"
+fi
+if ! echo "$unlock_to_exit" | grep -q "unlock_fb_info"; then
+	fail err_unlock_missing_unlock_fb_info "err_unlock must release fb_info lock"
+fi
+if ! echo "$exit_to_put" | grep -q "drm_dev_exit"; then
+	fail err_drm_exit_missing_drm_dev_exit "err_drm_exit must call drm_dev_exit"
+fi
+if ! echo "$put_to_out" | grep -q "drm_dev_put"; then
+	fail err_drm_put_missing_drm_dev_put "err_drm_put must call drm_dev_put"
+fi
+
 # Check CONFIG_DRM_FBDEV_EMULATION guard
 grep -q "#if !defined(CONFIG_DRM_FBDEV_EMULATION)" "$DC_FILE" || fail missing_CONFIG_DRM_FBDEV_EMULATION_guard
 
@@ -194,5 +278,5 @@ echo "PASS gate2 dc_sun4i structure validated"
 echo "  dc_sun4i.c: $(wc -l < "$DC_FILE") lines"
 echo "  Kbuild.mk: $(wc -l < "$KBUILD_FILE") lines"
 echo "  DC API functions: 12/12 present"
-echo "  Lifecycle: teardown ordering (unlock<exit<put), psOwner cached, discovery protected"
+echo "  Lifecycle: teardown ordering (unlock<exit<put), psOwner cached, discovery protected, success path verified"
 echo "  Build integration: Makefile + build-sunxi-a133.sh"

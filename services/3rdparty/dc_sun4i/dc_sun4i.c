@@ -1007,11 +1007,18 @@ static int __init DC_SUN4I_init(void)
 			psLINFBInfo->var.xres, psLINFBInfo->var.yres,
 			psLINFBInfo->var.xres_virtual, psLINFBInfo->var.yres_virtual,
 			ePixFormat, gpsDeviceData->bCanFlip);
-	err = 0;
-	goto err_unlock; /* Success: release locks/enter, keep drm_dev ref */
+	/* Success: release locks/enter but RETAIN drm_dev reference for exit.
+	 * Critical: this path must NOT fall through to err_drm_put.
+	 * The drm_dev_get reference is held in gpsDeviceData->psDRMDev until
+	 * DC_SUN4I_exit calls drm_dev_put.
+	 */
+	console_unlock();
+	unlock_fb_info(psLINFBInfo);
+	drm_dev_exit(init_drm_idx);
+	return 0;
 
 /*
- * Teardown ordering (fall-through labels):
+ * Error teardown ordering (fall-through labels):
  *   1. kfree device data (if allocated)
  *   2. module_put cached owner (if try_module_get succeeded)
  *   3. console_unlock + unlock_fb_info (release fb/console locks)
