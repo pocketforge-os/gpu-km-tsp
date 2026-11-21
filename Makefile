@@ -188,6 +188,9 @@ obj-$(CONFIG_DRM_IMG_ROGUE) += $(INTERNAL_KBUILD_OBJECTS)
 #   - PVR_DC_NULL=1: dc_null backend
 #   - PVR_DC_SUN4I=1: dc_sun4i backend
 #   - none of above (default): dc_sunxi backend
+#
+# Backend suppression: PVR_DC_SUN4I=1 or PVR_DC_NULL=1 suppresses dc_sunxi
+# to ensure exactly one backend is selected.
 ifeq ($(PVR_SYSTEM),sunxi_a133)
   # Reject conflicting explicit overrides
   ifeq ($(PVR_HEADLESS_NO_DC),1)
@@ -212,10 +215,17 @@ endif
 # PVR_HEADLESS_NO_DC=1 (e.g. for the mainline 6.x headless build, tsp-mc9m.1) to
 # build only the GPU KM and skip the display-class bridge. Default is unchanged,
 # so the 4.9-BSP build still builds dc_sunxi.
+#
+# Backend suppression: dc_sunxi is suppressed when PVR_DC_SUN4I=1 or PVR_DC_NULL=1
+# to ensure exactly one backend is selected.
 ifeq ($(PVR_SYSTEM),sunxi_a133)
 ifneq ($(PVR_HEADLESS_NO_DC),1)
+ifneq ($(PVR_DC_SUN4I),1)
+ifneq ($(PVR_DC_NULL),1)
   include $(DDK_SRC)/services/3rdparty/dc_sunxi/Kbuild.mk
   obj-$(CONFIG_DRM_IMG_ROGUE) += dc_sunxi.o
+endif
+endif
 endif
 endif
 

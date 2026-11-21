@@ -51,12 +51,11 @@ fi
 #   - No CONFIG_DRM_FBDEV_EMULATION + kernel 4.9: dc_sunxi requires legacy CONFIG_FB
 # Explicit PVR_HEADLESS_NO_DC / PVR_DC_NULL / PVR_DC_SUN4I win.
 AUTCONF_H="$KERNELDIR/include/generated/autoconf.h"
-HAS_DRM_FBDEV_EMU=$(grep -c '^#define CONFIG_DRM_FBDEV_EMULATION 1$' "$AUTCONF_H" 2>/dev/null || echo 0)
-HAS_LEGACY_FB=$(grep -c '^#define CONFIG_FB 1$' "$AUTCONF_H" 2>/dev/null || echo 0)
+HAS_DRM_FBDEV_EMU=$(grep -q '^#define CONFIG_DRM_FBDEV_EMULATION 1$' "$AUTCONF_H" 2>/dev/null && echo 1 || echo 0)
+HAS_LEGACY_FB=$(grep -q '^#define CONFIG_FB 1$' "$AUTCONF_H" 2>/dev/null && echo 1 || echo 0)
 
 if [ "$HAS_DRM_FBDEV_EMU" -eq 0 ] && [ "$HAS_LEGACY_FB" -eq 0 ]; then
-    # No fbdev support at all; use dc_null
-    PVR_HEADLESS_NO_DC="${PVR_HEADLESS_NO_DC:-1}"
+    # No fbdev support at all; use dc_null (not headless + null conflict)
     PVR_DC_NULL="${PVR_DC_NULL:-1}"
 else
     # fbdev support present; check kernel version to choose dc_sun4i vs dc_sunxi

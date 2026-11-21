@@ -38,8 +38,7 @@ grep -q 'mutually exclusive' "$MAKEFILE" || fail missing_mutual_exclusivity_doc
 grep -q 'dc_sun4i.ko' "$BUILD_SCRIPT" || fail missing_dc_sun4i.ko_output
 
 # Verify the logic flow in build script
-# 1. No fbdev support at all -> dc_null
-grep -A10 'HAS_DRM_FBDEV_EMU.*-eq 0.*HAS_LEGACY_FB.*-eq 0' "$BUILD_SCRIPT" | grep -q 'PVR_HEADLESS_NO_DC' || fail missing_dc_null_fallback
+# 1. No fbdev support at all -> dc_null only (not headless + null conflict)
 grep -A10 'HAS_DRM_FBDEV_EMU.*-eq 0.*HAS_LEGACY_FB.*-eq 0' "$BUILD_SCRIPT" | grep -q 'PVR_DC_NULL' || fail missing_dc_null_fallback
 
 # 2. CONFIG_FB + kernel 6.x+ -> dc_sun4i
@@ -50,6 +49,6 @@ echo "  DRM fbdev emulation detection: present"
 echo "  Legacy CONFIG_FB detection: present"
 echo "  Kernel version detection: present"
 echo "  dc_sun4i for kernel 6.x+ with DRM fbdev: present"
-echo "  dc_null fallback (no fbdev): present"
+echo "  dc_null fallback (no fbdev): present (single backend, not headless+null)"
 echo "  dc_sunxi default (kernel <6 or legacy FB): implicit (no special flag)"
 echo "  Mutual exclusivity: documented"
