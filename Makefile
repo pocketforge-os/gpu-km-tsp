@@ -212,3 +212,17 @@ ifeq ($(PVR_DC_NULL),1)
   obj-$(CONFIG_DRM_IMG_ROGUE) += dc_null.o
 endif
 endif
+
+# dc_sun4i: fbdev-to-PVR-DC bridge for sun4i-drm on Linux 7.2 (separate .ko,
+# depends on pvrsrvkm). Binds registered_fb[0] populated by sun4i-drm's fbdev
+# emulation (CONFIG_DRM_FBDEV_EMULATION=y, defaults to CONFIG_FB=y). Functionally
+# equivalent to dc_sunxi but targets mainline sun4i-drm rather than legacy sunxi
+# disp. Bead tsp-71fdd65791d8498f4d78. Requires CONFIG_FB; build script auto-detects
+# and falls back to dc_null if absent. Opt in with PVR_DC_SUN4I=1 (mutually exclusive
+# in practice with dc_sunxi and dc_null — you want exactly one DC backend).
+ifeq ($(PVR_SYSTEM),sunxi_a133)
+ifeq ($(PVR_DC_SUN4I),1)
+  include $(DDK_SRC)/services/3rdparty/dc_sun4i/Kbuild.mk
+  obj-$(CONFIG_DRM_IMG_ROGUE) += dc_sun4i.o
+endif
+endif
