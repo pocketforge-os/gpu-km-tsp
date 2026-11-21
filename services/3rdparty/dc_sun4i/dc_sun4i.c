@@ -870,8 +870,15 @@ static int dc_sun4i_unbind_notifier(struct notifier_block *nb,
 		psLINFBInfo = psDeviceData->psLINFBInfo;
 		pr_info("dc_sun4i: provider unbind detected, calling fb_release before teardown");
 
+		/* Use the same locking contract as normal exit path */
+		lock_fb_info(psLINFBInfo);
+		console_lock();
+
 		if(psLINFBInfo->fbops->fb_release)
 			psLINFBInfo->fbops->fb_release(psLINFBInfo, 0);
+
+		console_unlock();
+		unlock_fb_info(psLINFBInfo);
 
 		psDeviceData->bFBReleased = true;
 	}
@@ -1048,26 +1055,26 @@ static int __init DC_SUN4I_init(void)
 	gpsDeviceData->ePixFormat = ePixFormat;
 	gpsDeviceData->bCanFlip = DC_SUN4I_FlipPossible(psLINFBInfo);
 
+	/* Register platform-bus notifier BEFORE DCRegisterDevice publication.
+	 * This ensures fb_release is called before sun4i-drm teardown.
+	 * Failure is fatal - we must guarantee fb_release on provider unbind.
+	 * bus_unregister_notifier synchronizes with running callbacks.
+	 */
+	gpsDeviceData->sUnbindNotifier.notifier_call = dc_sun4i_unbind_notifier;
+	if(bus_register_notifier(&platform_bus_type, &gpsDeviceData->sUnbindNotifier) != 0)
+	{
+		pr_err("dc_sun4i: failed to register unbind notifier, cannot guarantee fb_release on unbind");
+		goto err_put_device;
+	}
+	gpsDeviceData->bNotifierRegistered = true;
+	pr_info("dc_sun4i: registered platform-bus unbind notifier");
+
+	/* Now register with PVR services - callbacks may fire immediately */
 	if(DCRegisterDevice(&sDCFunctions,
 						MAX_COMMANDS_IN_FLIGHT,
 						gpsDeviceData,
 						&gpsDeviceData->hSrvHandle) != PVRSRV_OK)
-		goto err_put_device;
-
-	/* Register platform-bus notifier for provider unbind handling.
-	 * This ensures fb_release is called before sun4i-drm teardown.
-	 * bus_unregister_notifier synchronizes with running callbacks.
-	 */
-	gpsDeviceData->sUnbindNotifier.notifier_call = dc_sun4i_unbind_notifier;
-	if(bus_register_notifier(&platform_bus_type, &gpsDeviceData->sUnbindNotifier) == 0)
-	{
-		gpsDeviceData->bNotifierRegistered = true;
-		pr_info("dc_sun4i: registered platform-bus unbind notifier");
-	}
-	else
-	{
-		pr_warn("dc_sun4i: failed to register unbind notifier, fb_release on unbind not guaranteed");
-	}
+		goto err_unregister_notifier;
 
 	pr_info("Found usable fbdev device (%s):\n"
 			"range (physical) = 0x%lx-0x%lx\n"
@@ -1095,13 +1102,17 @@ static int __init DC_SUN4I_init(void)
 
 /*
  * Error teardown ordering (fall-through labels):
- *   1. put_device (release platform device reference)
- *   2. kfree device data (if allocated)
- *   3. module_put cached owner (if try_module_get succeeded)
- *   4. console_unlock + unlock_fb_info (release fb/console locks)
- *   5. drm_dev_exit (leave unplug-protected section)
- *   6. drm_dev_put (release drm_device reference)
+ *   1. unregister_notifier (if registered, synchronizes with running callbacks)
+ *   2. put_device (release platform device reference)
+ *   3. kfree device data (if allocated)
+ *   4. module_put cached owner (if try_module_get succeeded)
+ *   5. console_unlock + unlock_fb_info (release fb/console locks)
+ *   6. drm_dev_exit (leave unplug-protected section)
+ *   7. drm_dev_put (release drm_device reference)
  */
+err_unregister_notifier:
+	if(gpsDeviceData->bNotifierRegistered)
+		bus_unregister_notifier(&platform_bus_type, &gpsDeviceData->sUnbindNotifier);
 err_put_device:
 	put_device(&gpsDeviceData->psPlatformDev->dev);
 err_kfree:

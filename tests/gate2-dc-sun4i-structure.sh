@@ -218,9 +218,10 @@ fi
 
 # Test 5: Negative mutation test - verify no code path after success can reach err_drm_put via fall-through
 # The success path ends with "return 0;" which exits the function, so no fall-through is possible
-# Verify that between "return 0;" and the first error label (err_put_device:) there is only whitespace/comments
-# Use awk to extract lines after "return 0;" and before "err_put_device:"
-between=$(echo "$init_block" | awk '/return 0;/{found=1; next} /^err_put_device:/{exit} found{print}')
+# Error labels can appear between return 0; and the actual cleanup code, but there should be no
+# executable code that could run after return 0; before hitting a goto or the first error label
+# Use awk to extract lines after "return 0;" and before the first error label (err_unregister_notifier: or err_put_device:)
+between=$(echo "$init_block" | awk '/return 0;/{found=1; next} /^err_/{exit} found{print}')
 # Strip out multi-line comments, single-line comments, empty lines
 stripped=$(echo "$between" | sed '/\/\*/,/\*\//d' | sed '/^[[:space:]]*\/\//d' | sed '/^[[:space:]]*$/d' | sed '/^[[:space:]]*\*/d')
 if [ -n "$stripped" ]; then
@@ -324,9 +325,62 @@ if ! echo "$notifier_block" | grep -q "BUS_NOTIFY_UNBIND_DRIVER"; then
 	fail notifier_missing_unbind_action "notifier must handle BUS_NOTIFY_UNBIND_DRIVER"
 fi
 
+# 8j: Notifier callback uses lock_fb_info/console_lock (same contract as exit path)
+if ! echo "$notifier_block" | grep -q "lock_fb_info"; then
+	fail notifier_missing_lock_fb_info "notifier callback must call lock_fb_info before fb_release"
+fi
+if ! echo "$notifier_block" | grep -q "console_lock"; then
+	fail notifier_missing_console_lock "notifier callback must call console_lock before fb_release"
+fi
+if ! echo "$notifier_block" | grep -q "console_unlock"; then
+	fail notifier_missing_console_unlock "notifier callback must call console_unlock after fb_release"
+fi
+if ! echo "$notifier_block" | grep -q "unlock_fb_info"; then
+	fail notifier_missing_unlock_fb_info "notifier callback must call unlock_fb_info after fb_release"
+fi
+
+# 8k: Notifier registered BEFORE DCRegisterDevice publication
+# Critical: if notifier registration fails or is done after publication, provider unbind can be missed
+init_block=$(sed -n '/^static int __init DC_SUN4I_init/,/^}/p' "$DC_FILE")
+notifier_reg_line=$(echo "$init_block" | grep -n "bus_register_notifier" | head -1 | cut -d: -f1)
+dc_register_line=$(echo "$init_block" | grep -n "if(DCRegisterDevice" | head -1 | cut -d: -f1)
+if [ -z "$notifier_reg_line" ] || [ -z "$dc_register_line" ]; then
+	fail notifier_or_dc_register_not_found "notifier_reg=$notifier_reg_line dc_register=$dc_register_line"
+fi
+if [ "$notifier_reg_line" -ge "$dc_register_line" ]; then
+	fail notifier_registered_after_publication "bus_register_notifier at line $notifier_reg_line must be BEFORE DCRegisterDevice at line $dc_register_line"
+fi
+
+# 8l: Notifier registration failure must fail init (not just log warning)
+# If bus_register_notifier fails, init must goto error path (not continue)
+# Look for the pattern: if(bus_register_notifier(...) != 0) goto err_...
+notifier_fail_block=$(echo "$init_block" | sed -n '/bus_register_notifier/,/^[[:space:]]*}$/p' | head -20)
+if echo "$notifier_fail_block" | grep -q "goto err_"; then
+	: # Good - notifier failure causes init to fail
+else
+	fail notifier_failure_not_fatal "bus_register_notifier failure must cause init to fail (goto err_...)"
+fi
+
+# 8m: Verify err_unregister_notifier label exists for cleanup
+if ! grep -q "err_unregister_notifier:" "$DC_FILE"; then
+	fail missing_err_unregister_notifier_label "err_unregister_notifier label required for notifier cleanup"
+fi
+
+# 8n: Verify err_unregister_notifier comes before err_put_device (fall-through order)
+unreg_notifier_line=$(grep -n "^err_unregister_notifier:" "$DC_FILE" | head -1 | cut -d: -f1)
+err_put_device_line=$(grep -n "^err_put_device:" "$DC_FILE" | head -1 | cut -d: -f1)
+if [ -n "$unreg_notifier_line" ] && [ -n "$err_put_device_line" ]; then
+	if [ "$unreg_notifier_line" -ge "$err_put_device_line" ]; then
+		fail err_unregister_notifier_order_wrong "err_unregister_notifier=$unreg_notifier_line must be BEFORE err_put_device=$err_put_device_line"
+	fi
+else
+	fail err_unregister_notifier_labels_missing "unreg_notifier=$unreg_notifier_line put_device=$err_put_device_line"
+fi
+
 echo "PASS gate2 dc_sun4i structure validated"
 echo "  dc_sun4i.c: $(wc -l < "$DC_FILE") lines"
 echo "  Kbuild.mk: $(wc -l < "$KBUILD_FILE") lines"
 echo "  DC API functions: 12/12 present"
-echo "  Lifecycle: teardown ordering (unlock<exit<put), psOwner cached, discovery protected, success path verified, fb_release notifier"
+echo "  Lifecycle: teardown ordering, psOwner cached, discovery protected, success path verified"
+echo "  fb_release notifier: registered BEFORE publication, fails closed, uses fb/console locks"
 echo "  Build integration: Makefile + build-sunxi-a133.sh"
