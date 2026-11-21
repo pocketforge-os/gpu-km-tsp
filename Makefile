@@ -182,6 +182,32 @@ $(PVRSRVKM_NAME)-y += $(foreach _m,$(INTERNAL_EXTRA_KBUILD_OBJECTS:.o=),$($(_m)-
 #obj-m += $(INTERNAL_KBUILD_OBJECTS)
 obj-$(CONFIG_DRM_IMG_ROGUE) += $(INTERNAL_KBUILD_OBJECTS)
 
+# Display Class backend selection: exactly one backend must be active.
+# Validate that conflicting overrides are rejected.
+#   - PVR_HEADLESS_NO_DC=1: no DC backend (headless GPU-only)
+#   - PVR_DC_NULL=1: dc_null backend
+#   - PVR_DC_SUN4I=1: dc_sun4i backend
+#   - none of above (default): dc_sunxi backend
+#
+# Backend suppression: PVR_DC_SUN4I=1 or PVR_DC_NULL=1 suppresses dc_sunxi
+# to ensure exactly one backend is selected.
+ifeq ($(PVR_SYSTEM),sunxi_a133)
+  # Reject conflicting explicit overrides
+  ifeq ($(PVR_HEADLESS_NO_DC),1)
+    ifeq ($(PVR_DC_NULL),1)
+      $(error ERROR: Conflicting DC backend selection: PVR_HEADLESS_NO_DC=1 and PVR_DC_NULL=1 are mutually exclusive)
+    endif
+    ifeq ($(PVR_DC_SUN4I),1)
+      $(error ERROR: Conflicting DC backend selection: PVR_HEADLESS_NO_DC=1 and PVR_DC_SUN4I=1 are mutually exclusive)
+    endif
+  endif
+  ifeq ($(PVR_DC_NULL),1)
+    ifeq ($(PVR_DC_SUN4I),1)
+      $(error ERROR: Conflicting DC backend selection: PVR_DC_NULL=1 and PVR_DC_SUN4I=1 are mutually exclusive)
+    endif
+  endif
+endif
+
 # dc_sunxi: fbdev-to-PVR-DC bridge (separate .ko, depends on pvrsrvkm).
 # It is a Linux *fbdev* display shim (uses registered_fb[], requires CONFIG_FB)
 # and is architecturally obsolete on a mainline kernel, whose A133 display path
@@ -189,10 +215,17 @@ obj-$(CONFIG_DRM_IMG_ROGUE) += $(INTERNAL_KBUILD_OBJECTS)
 # PVR_HEADLESS_NO_DC=1 (e.g. for the mainline 6.x headless build, tsp-mc9m.1) to
 # build only the GPU KM and skip the display-class bridge. Default is unchanged,
 # so the 4.9-BSP build still builds dc_sunxi.
+#
+# Backend suppression: dc_sunxi is suppressed when PVR_DC_SUN4I=1 or PVR_DC_NULL=1
+# to ensure exactly one backend is selected.
 ifeq ($(PVR_SYSTEM),sunxi_a133)
 ifneq ($(PVR_HEADLESS_NO_DC),1)
+ifneq ($(PVR_DC_SUN4I),1)
+ifneq ($(PVR_DC_NULL),1)
   include $(DDK_SRC)/services/3rdparty/dc_sunxi/Kbuild.mk
   obj-$(CONFIG_DRM_IMG_ROGUE) += dc_sunxi.o
+endif
+endif
 endif
 endif
 
@@ -210,5 +243,19 @@ ifeq ($(PVR_SYSTEM),sunxi_a133)
 ifeq ($(PVR_DC_NULL),1)
   include $(DDK_SRC)/services/3rdparty/dc_null/Kbuild.mk
   obj-$(CONFIG_DRM_IMG_ROGUE) += dc_null.o
+endif
+endif
+
+# dc_sun4i: fbdev-to-PVR-DC bridge for sun4i-drm on Linux 7.2 (separate .ko,
+# depends on pvrsrvkm). Binds registered_fb[0] populated by sun4i-drm's fbdev
+# emulation (CONFIG_DRM_FBDEV_EMULATION=y, defaults to CONFIG_FB=y). Functionally
+# equivalent to dc_sunxi but targets mainline sun4i-drm rather than legacy sunxi
+# disp. Bead tsp-71fdd65791d8498f4d78. Requires CONFIG_FB; build script auto-detects
+# and falls back to dc_null if absent. Opt in with PVR_DC_SUN4I=1 (mutually exclusive
+# in practice with dc_sunxi and dc_null — you want exactly one DC backend).
+ifeq ($(PVR_SYSTEM),sunxi_a133)
+ifeq ($(PVR_DC_SUN4I),1)
+  include $(DDK_SRC)/services/3rdparty/dc_sun4i/Kbuild.mk
+  obj-$(CONFIG_DRM_IMG_ROGUE) += dc_sun4i.o
 endif
 endif

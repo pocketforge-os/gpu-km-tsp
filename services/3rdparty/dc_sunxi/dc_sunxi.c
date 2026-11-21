@@ -100,7 +100,7 @@ void DC_SUNXI_GetInfo(IMG_HANDLE hDeviceData,
 {
 	PVR_UNREFERENCED_PARAMETER(hDeviceData);
 
-	strncpy(psDisplayInfo->szDisplayName, DRVNAME " 1", DC_NAME_SIZE);
+	strscpy(psDisplayInfo->szDisplayName, DRVNAME " 1", DC_NAME_SIZE);
 
 	psDisplayInfo->ui32MinDisplayPeriod	= 0;
 	psDisplayInfo->ui32MaxDisplayPeriod	= 1;

@@ -44,22 +44,49 @@ if [ ! -f "$KERNELDIR/include/generated/autoconf.h" ]; then
     exit 1
 fi
 
-# dc_sunxi is an fbdev shim (registered_fb[], CONFIG_FB). A kernel without
-# CONFIG_FB (the mainline 6.x/7.x lines) cannot build it, so default to the
-# headless build with the dc_null Display Class backend, as the mainline
-# tsp-mc9m.9 build did. Explicit PVR_HEADLESS_NO_DC / PVR_DC_NULL win.
-if ! grep -q '^#define CONFIG_FB 1$' "$KERNELDIR/include/generated/autoconf.h"; then
-    PVR_HEADLESS_NO_DC="${PVR_HEADLESS_NO_DC:-1}"
-    PVR_DC_NULL="${PVR_DC_NULL:-1}"
+# DC backend selection based on kernel version and DRM fbdev prerequisites:
+#   - No CONFIG_DRM_FBDEV_EMULATION (mainline without fbdev emulation): dc_null (headless)
+#   - CONFIG_DRM_FBDEV_EMULATION + kernel 7.x+: dc_sun4i (sun4i-drm fbdev emulation)
+#   - CONFIG_DRM_FBDEV_EMULATION + kernel 4.9/5.x: dc_sunxi (legacy sunxi disp fbdev)
+#   - No CONFIG_DRM_FBDEV_EMULATION + kernel 4.9: dc_sunxi requires legacy CONFIG_FB
+# Explicit PVR_HEADLESS_NO_DC / PVR_DC_NULL / PVR_DC_SUN4I win over automatic defaults.
+AUTCONF_H="$KERNELDIR/include/generated/autoconf.h"
+HAS_DRM_FBDEV_EMU=$(grep -q '^#define CONFIG_DRM_FBDEV_EMULATION 1$' "$AUTCONF_H" 2>/dev/null && echo 1 || echo 0)
+HAS_LEGACY_FB=$(grep -q '^#define CONFIG_FB 1$' "$AUTCONF_H" 2>/dev/null && echo 1 || echo 0)
+
+# Check if any explicit backend selector is already set
+EXPLICIT_SET=0
+[ -n "${PVR_HEADLESS_NO_DC:-}" ] && EXPLICIT_SET=1
+[ -n "${PVR_DC_NULL:-}" ] && EXPLICIT_SET=1
+[ -n "${PVR_DC_SUN4I:-}" ] && EXPLICIT_SET=1
+
+# Only apply automatic defaults if no explicit selector is set
+if [ "$EXPLICIT_SET" -eq 0 ]; then
+    if [ "$HAS_DRM_FBDEV_EMU" -eq 0 ] && [ "$HAS_LEGACY_FB" -eq 0 ]; then
+        # No fbdev support at all; use dc_null
+        PVR_DC_NULL=1
+    else
+        # fbdev support present; check kernel version to choose dc_sun4i vs dc_sunxi
+        KERNEL_VERSION=$(make -C "$KERNELDIR" kernelversion 2>/dev/null | head -n1)
+        KERNEL_MAJOR=$(echo "$KERNEL_VERSION" | cut -d. -f1)
+        
+        # Default to dc_sun4i for kernel 6.x+ with DRM fbdev emulation
+        # Keep dc_sunxi for 4.9/5.x (legacy BSP with CONFIG_FB)
+        if [ "${KERNEL_MAJOR:-0}" -ge 6 ] && [ "$HAS_DRM_FBDEV_EMU" -eq 1 ]; then
+            PVR_DC_SUN4I=1
+        fi
+        # For kernel < 6 or without DRM fbdev emulation, leave dc_sunxi as default
+    fi
 fi
 
 echo "=== Building pvrsrvkm.ko for sunxi_a133 ==="
 echo "  DDK source:    $SCRIPT_DIR"
 echo "  Kernel:        $KERNELDIR"
+echo "  Kernel ver:    ${KERNEL_VERSION:-unknown}"
 echo "  Cross:         $CROSS_COMPILE"
 echo "  Odyssey capture: ${ODYSSEY_CAPTURE:-0}"
 echo "  Extra CFLAGS:  ${EXTRA_PVR_KM_CFLAGS:-}"
-echo "  Headless/DC:   PVR_HEADLESS_NO_DC=${PVR_HEADLESS_NO_DC:-0} PVR_DC_NULL=${PVR_DC_NULL:-0}"
+echo "  DC backend:    PVR_HEADLESS_NO_DC=${PVR_HEADLESS_NO_DC:-0} PVR_DC_NULL=${PVR_DC_NULL:-0} PVR_DC_SUN4I=${PVR_DC_SUN4I:-0}"
 echo "  Build-opts mk: ${PVR_BUILDOPTS_MK:-<auto-detect via Makefile>}"
 echo ""
 
@@ -74,6 +101,7 @@ make -C "$KERNELDIR" \
     PVR_SYSTEM=sunxi_a133 \
     ${PVR_HEADLESS_NO_DC:+PVR_HEADLESS_NO_DC="$PVR_HEADLESS_NO_DC"} \
     ${PVR_DC_NULL:+PVR_DC_NULL="$PVR_DC_NULL"} \
+    ${PVR_DC_SUN4I:+PVR_DC_SUN4I="$PVR_DC_SUN4I"} \
     ${PVR_BUILDOPTS_MK:+PVR_BUILDOPTS_MK="$PVR_BUILDOPTS_MK"} \
     modules \
     "$@"
@@ -86,4 +114,10 @@ if [ -f "$SCRIPT_DIR/pvrsrvkm.ko" ]; then
 fi
 if [ -f "$SCRIPT_DIR/services/system/rogue/sunxi_a133/dc_sunxi.ko" ]; then
     echo "  dc_sunxi.ko: $(ls -la "$SCRIPT_DIR/services/system/rogue/sunxi_a133/dc_sunxi.ko" | awk '{print $5}') bytes"
+fi
+if [ -f "$SCRIPT_DIR/services/system/rogue/sunxi_a133/dc_sun4i.ko" ]; then
+    echo "  dc_sun4i.ko: $(ls -la "$SCRIPT_DIR/services/system/rogue/sunxi_a133/dc_sun4i.ko" | awk '{print $5}') bytes"
+fi
+if [ -f "$SCRIPT_DIR/services/system/rogue/sunxi_a133/dc_null.ko" ]; then
+    echo "  dc_null.ko: $(ls -la "$SCRIPT_DIR/services/system/rogue/sunxi_a133/dc_null.ko" | awk '{print $5}') bytes"
 fi
