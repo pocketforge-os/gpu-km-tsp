@@ -98,6 +98,7 @@ typedef struct
 	IMG_UINT32			ePixFormat;
 	struct drm_device	*psDRMDev;
 	struct fb_info		*psLINFBInfo;
+	struct module		*psOwner;	/* Cached fbops->owner; safe after fb_info stale */
 	bool				bCanFlip;
 }
 DC_SUN4I_DEVICE;
@@ -162,10 +163,10 @@ static int dc_sun4i_find_fb_info(struct drm_device **out_drm,
 				 struct fb_info **out_info)
 {
 	struct device_node *np = NULL;
-	struct platform_device *pdev;
-	struct device *dev;
+	struct platform_device *pdev = NULL;
 	struct drm_device *drm;
 	struct fb_info *info = NULL;
+	int drm_idx;
 
 	*out_drm = NULL;
 	*out_info = NULL;
@@ -193,8 +194,7 @@ static int dc_sun4i_find_fb_info(struct drm_device **out_drm,
 	}
 
 	/* Get the drm_device from platform device drvdata */
-	dev = &pdev->dev;
-	drm = dev_get_drvdata(dev);
+	drm = dev_get_drvdata(&pdev->dev);
 	if (!drm) {
 		pr_err("dc_sun4i: no drm_device in drvdata - sun4i-drm not fully initialized\n");
 		put_device(&pdev->dev);
@@ -204,28 +204,46 @@ static int dc_sun4i_find_fb_info(struct drm_device **out_drm,
 	/* Hold a reference on the drm_device to pin its lifetime */
 	drm_dev_get(drm);
 
-	/* Access fb_info through drm_fb_helper (public fields) */
-	if (!drm->fb_helper) {
-		pr_err("dc_sun4i: no fb_helper in drm_device - fbdev emulation not ready\n");
+	/*
+	 * Protect fb_helper/info dereference with drm_dev_enter().
+	 * fb_helper is a pointer inside drm_device set/cleared by the DRM driver.
+	 * drm_dev_enter() synchronizes against drm_dev_unplug() which is called
+	 * on unbind; after unplug, fb_helper may be torn down.
+	 */
+	if (!drm_dev_enter(drm, &drm_idx)) {
+		pr_err("dc_sun4i: DRM device unplugged during discovery\n");
 		drm_dev_put(drm);
 		put_device(&pdev->dev);
 		return -ENODEV;
+	}
+
+	/* Access fb_info through drm_fb_helper (public fields) */
+	if (!drm->fb_helper) {
+		pr_err("dc_sun4i: no fb_helper in drm_device - fbdev emulation not ready\n");
+		goto err_exit;
 	}
 
 	info = drm->fb_helper->info;
 	if (!info) {
 		pr_err("dc_sun4i: no fb_info in fb_helper - fbdev not initialized\n");
-		drm_dev_put(drm);
-		put_device(&pdev->dev);
-		return -ENODEV;
+		goto err_exit;
 	}
 
-	/* Release platform device reference - drm_dev ref now pins drm_device */
+	/* Success: leave protected section, release platform dev ref.
+	 * drm_dev reference held by caller until module exit.
+	 */
+	drm_dev_exit(drm_idx);
 	put_device(&pdev->dev);
 
 	*out_drm = drm;
 	*out_info = info;
 	return 0;
+
+err_exit:
+	drm_dev_exit(drm_idx);
+	drm_dev_put(drm);
+	put_device(&pdev->dev);
+	return -ENODEV;
 }
 
 
@@ -835,8 +853,10 @@ static int __init DC_SUN4I_init(void)
 	};
 
 	struct drm_device *psDRMDev = NULL;
-	struct fb_info *psLINFBInfo;
-	IMG_PIXFMT ePixFormat;
+	struct fb_info *psLINFBInfo = NULL;
+	struct module *psOwner = NULL;
+	IMG_PIXFMT ePixFormat = 0;
+	int init_drm_idx = 0;
 	int err = -ENODEV;
 
 	/* Linux 7.2: Discover fb_info via DRM device path.
@@ -852,11 +872,7 @@ static int __init DC_SUN4I_init(void)
 	}
 	err = -ENODEV; /* Reset for error paths below */
 
-	/* Protect all fb_info accesses with unplug synchronization.
-	 * Even though we just discovered the device, it could theoretically
-	 * be unplugged before we finish validation.
-	 */
-	int init_drm_idx;
+	/* Protect all fb_info accesses with unplug synchronization. */
 	if(!drm_dev_enter(psDRMDev, &init_drm_idx))
 	{
 		pr_err("dc_sun4i: DRM device unplugged during init\n");
@@ -864,17 +880,19 @@ static int __init DC_SUN4I_init(void)
 		goto err_out;
 	}
 
-	/* Linux 7.2: lock_fb_info is void, always succeeds */
+	/* lock_fb_info is void in Linux 7.2, always succeeds */
 	lock_fb_info(psLINFBInfo);
-
 	console_lock();
+
+	/* --- From here: must unwind via err_unlock (releases console+fb locks,
+	 *     then drm_dev_exit, then drm_dev_put) --- */
 
 	/* Filter out broken FB devices */
 	if(!psLINFBInfo->fix.smem_len || !psLINFBInfo->fix.line_length)
 	{
 		pr_err("The fbdev device detected had a zero smem_len or "
 			   "line_length,\nwhich suggests it is a broken driver.\n");
-		goto err_drm_put;
+		goto err_unlock;
 	}
 
 	if(psLINFBInfo->fix.type != FB_TYPE_PACKED_PIXELS ||
@@ -882,7 +900,7 @@ static int __init DC_SUN4I_init(void)
 	{
 		pr_err("The fbdev device detected is not truecolor with packed "
 			   "pixels.\n");
-		goto err_drm_put;
+		goto err_unlock;
 	}
 
 	if(psLINFBInfo->var.bits_per_pixel == 32)
@@ -902,7 +920,7 @@ static int __init DC_SUN4I_init(void)
 			   psLINFBInfo->var.red.offset,
 			   psLINFBInfo->var.green.offset,
 			   psLINFBInfo->var.blue.offset);
-			goto err_drm_put;
+			goto err_unlock;
 		}
 #if defined(DC_SUN4I_FORCE_XRGB8888)
 		ePixFormat = IMG_PIXFMT_B8G8R8X8_UNORM;
@@ -927,7 +945,7 @@ static int __init DC_SUN4I_init(void)
 			   psLINFBInfo->var.red.offset,
 			   psLINFBInfo->var.green.offset,
 			   psLINFBInfo->var.blue.offset);
-			goto err_drm_put;
+			goto err_unlock;
 		}
 		ePixFormat = IMG_PIXFMT_B5G6R5_UNORM;
 	}
@@ -935,13 +953,18 @@ static int __init DC_SUN4I_init(void)
 	{
 		pr_err("The fbdev device detected uses an unsupported "
 			   "bpp (%u).\n", psLINFBInfo->var.bits_per_pixel);
-		goto err_drm_put;
+		goto err_unlock;
 	}
 
-	if(!try_module_get(psLINFBInfo->fbops->owner))
+	/* Cache the fbops owner module reference independently.
+	 * This allows balanced module_put in exit without dereferencing
+	 * potentially stale fb_info after provider unbind/unplug.
+	 */
+	psOwner = psLINFBInfo->fbops->owner;
+	if(!try_module_get(psOwner))
 	{
 		pr_err("try_module_get() failed");
-		goto err_drm_put;
+		goto err_unlock;
 	}
 
 	if(psLINFBInfo->fbops->fb_open &&
@@ -955,9 +978,12 @@ static int __init DC_SUN4I_init(void)
 	if(!gpsDeviceData)
 		goto err_module_put;
 
-	/* Set ALL fields BEFORE DCRegisterDevice to prevent publication race */
+	/* Set ALL fields BEFORE DCRegisterDevice to prevent publication race.
+	 * Callbacks may fire immediately after DCRegisterDevice returns.
+	 */
 	gpsDeviceData->psLINFBInfo = psLINFBInfo;
 	gpsDeviceData->psDRMDev = psDRMDev;
+	gpsDeviceData->psOwner = psOwner;
 	gpsDeviceData->ePixFormat = ePixFormat;
 	gpsDeviceData->bCanFlip = DC_SUN4I_FlipPossible(psLINFBInfo);
 
@@ -982,19 +1008,27 @@ static int __init DC_SUN4I_init(void)
 			psLINFBInfo->var.xres_virtual, psLINFBInfo->var.yres_virtual,
 			ePixFormat, gpsDeviceData->bCanFlip);
 	err = 0;
-	goto err_drm_exit; /* Success - skip cleanup, just release enter/locks */
+	goto err_unlock; /* Success: release locks/enter, keep drm_dev ref */
 
+/*
+ * Teardown ordering (fall-through labels):
+ *   1. kfree device data (if allocated)
+ *   2. module_put cached owner (if try_module_get succeeded)
+ *   3. console_unlock + unlock_fb_info (release fb/console locks)
+ *   4. drm_dev_exit (leave unplug-protected section)
+ *   5. drm_dev_put (release drm_device reference)
+ */
 err_kfree:
 	kfree(gpsDeviceData);
 err_module_put:
-	module_put(psLINFBInfo->fbops->owner);
-err_drm_put:
-	drm_dev_put(psDRMDev);  /* Error path: release the drm_dev_get reference */
-err_drm_exit:
-	drm_dev_exit(init_drm_idx);  /* All paths: release drm_dev_enter */
+	module_put(psOwner);
 err_unlock:
 	console_unlock();
 	unlock_fb_info(psLINFBInfo);
+err_drm_exit:
+	drm_dev_exit(init_drm_idx);
+err_drm_put:
+	drm_dev_put(psDRMDev);
 err_out:
 	return err;
 }
@@ -1004,32 +1038,38 @@ static void __exit DC_SUN4I_exit(void)
 	DC_SUN4I_DEVICE *psDeviceData = gpsDeviceData;
 	struct fb_info *psLINFBInfo = psDeviceData->psLINFBInfo;
 	struct drm_device *psDRMDev = psDeviceData->psDRMDev;
+	struct module *psOwner = psDeviceData->psOwner; /* cached, no stale fb_info deref */
 	int drm_idx;
+
+	/* Unregister first so no new callbacks fire */
+	DCUnregisterDevice(psDeviceData->hSrvHandle);
 
 	/* Check if device is still plugged before accessing fb_info */
 	if(!drm_dev_enter(psDRMDev, &drm_idx)) {
-		/* Device unplugged - skip fb_info teardown, just unregister and free */
+		/* Device unplugged - cannot safely access fb_info for fb_release.
+		 * But we MUST balance the module_put using our cached owner.
+		 */
 		pr_info("dc_sun4i: DRM device unplugged during exit, skipping fb_release");
-		DCUnregisterDevice(psDeviceData->hSrvHandle);
+		module_put(psOwner);
 		kfree(psDeviceData);
 		drm_dev_put(psDRMDev);
 		return;
 	}
 
-	/* Device still plugged - safe to access fb_info */
+	/* Device still plugged - safe to access fb_info under protection */
 	lock_fb_info(psLINFBInfo);
 	console_lock();
 
-    if(psLINFBInfo->fbops->fb_release)
-	   psLINFBInfo->fbops->fb_release(psLINFBInfo, 0);
+	if(psLINFBInfo->fbops->fb_release)
+		psLINFBInfo->fbops->fb_release(psLINFBInfo, 0);
 
-	module_put(psLINFBInfo->fbops->owner);
-
+	/* Teardown ordering: release locks, then drm_dev_exit, then drm_dev_put */
 	console_unlock();
 	unlock_fb_info(psLINFBInfo);
 	drm_dev_exit(drm_idx);
 
-	DCUnregisterDevice(psDeviceData->hSrvHandle);
+	module_put(psOwner); /* balanced with try_module_get in init */
+
 	kfree(psDeviceData);
 
 	/* Release the drm_device reference acquired in init */

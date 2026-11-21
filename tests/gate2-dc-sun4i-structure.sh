@@ -85,14 +85,90 @@ for func in DC_SUN4I_PanelQuery DC_SUN4I_DimQuery DC_SUN4I_ContextConfigureCheck
 	fi
 done
 
-# Verify error unwind labels exist in init for drm_dev_put
+# --- LIFECYCLE AND ERROR-PATH TESTS ---
+
+# Verify error unwind labels exist in init
 if ! grep -q "err_drm_put:" "$DC_FILE"; then
 	fail missing_err_drm_put_label
 fi
+if ! grep -q "err_drm_exit:" "$DC_FILE"; then
+	fail missing_err_drm_exit_label
+fi
+if ! grep -q "err_unlock:" "$DC_FILE"; then
+	fail missing_err_unlock_label
+fi
+
+# Verify teardown ordering in init: err_unlock must come BEFORE err_drm_exit
+# which must come BEFORE err_drm_put (fall-through label order)
+unlock_line=$(grep -n "^err_unlock:" "$DC_FILE" | head -1 | cut -d: -f1)
+drm_exit_line=$(grep -n "^err_drm_exit:" "$DC_FILE" | head -1 | cut -d: -f1)
+drm_put_line=$(grep -n "^err_drm_put:" "$DC_FILE" | head -1 | cut -d: -f1)
+if [ -n "$unlock_line" ] && [ -n "$drm_exit_line" ] && [ -n "$drm_put_line" ]; then
+	if [ "$unlock_line" -ge "$drm_exit_line" ] || [ "$drm_exit_line" -ge "$drm_put_line" ]; then
+		fail teardown_order_wrong "err_unlock=$unlock_line err_drm_exit=$drm_exit_line err_drm_put=$drm_put_line (expected unlock<exit<put)"
+	fi
+else
+	fail teardown_labels_missing "unlock=$unlock_line exit=$drm_exit_line put=$drm_put_line"
+fi
+
+# Verify validation errors in init go to err_unlock (not err_drm_put which skips lock release)
+# Check that at least one validation error uses "goto err_unlock"
+if ! grep -q "goto err_unlock" "$DC_FILE"; then
+	fail validation_errors_wrong_target "no goto err_unlock found; validation errors must release locks"
+fi
+
+# Verify psOwner field exists in device struct (cached module reference)
+if ! grep -q "struct module.*psOwner" "$DC_FILE"; then
+	fail missing_psOwner_field "device struct must cache fbops->owner independently"
+fi
+
+# Verify psOwner is set before DCRegisterDevice publication
+reg_line=$(grep -n "if(DCRegisterDevice" "$DC_FILE" | head -1 | cut -d: -f1)
+owner_assign_line=$(grep -n "gpsDeviceData->psOwner = " "$DC_FILE" | head -1 | cut -d: -f1)
+if [ -n "$reg_line" ] && [ -n "$owner_assign_line" ]; then
+	if [ "$owner_assign_line" -ge "$reg_line" ]; then
+		fail owner_set_after_publication "psOwner=$owner_assign_line DCRegisterDevice=$reg_line (must set before)"
+	fi
+else
+	fail owner_cache_missing "psOwner assignment or DCRegisterDevice not found"
+fi
+
+# Verify DC_SUN4I_exit uses cached psOwner (not stale fb_info->fbops->owner)
+exit_block=$(awk '/^static void __exit DC_SUN4I_exit/,/^\}/' "$DC_FILE")
+if ! echo "$exit_block" | grep -q "psOwner"; then
+	fail exit_uses_stale_fb_info "DC_SUN4I_exit must use cached psOwner, not fb_info->fbops->owner"
+fi
+# Exit must NOT dereference fbops->owner directly
+if echo "$exit_block" | grep -q "fbops->owner"; then
+	fail exit_dereferences_stale_fbops "DC_SUN4I_exit must not dereference fbops->owner"
+fi
 
 # Verify DC_SUN4I_exit calls drm_dev_put
-if ! awk '/^static void __exit DC_SUN4I_exit/,/^\}/' "$DC_FILE" | grep -q "drm_dev_put"; then
+if ! echo "$exit_block" | grep -q "drm_dev_put"; then
 	fail missing_drm_dev_put_in_exit
+fi
+
+# Verify DC_SUN4I_exit calls module_put (balanced with try_module_get)
+if ! echo "$exit_block" | grep -q "module_put"; then
+	fail missing_module_put_in_exit
+fi
+
+# Verify DC_SUN4I_exit calls DCUnregisterDevice before teardown
+unreg_line=$(echo "$exit_block" | grep -n "DCUnregisterDevice" | head -1 | cut -d: -f1)
+put_line=$(echo "$exit_block" | grep -n "drm_dev_put" | head -1 | cut -d: -f1)
+if [ -n "$unreg_line" ] && [ -n "$put_line" ]; then
+	if [ "$unreg_line" -ge "$put_line" ]; then
+		fail exit_unregister_order "DCUnregisterDevice=$unreg_line drm_dev_put=$put_line (unregister first)"
+	fi
+fi
+
+# Verify drm_dev_enter is used in dc_sun4i_find_fb_info (discovery protection)
+discovery_line=$(grep -n "^static int dc_sun4i_find_fb_info" "$DC_FILE" | head -1 | cut -d: -f1)
+if [ -n "$discovery_line" ]; then
+	discovery_end=$((discovery_line + 80))
+	if ! sed -n "${discovery_line},${discovery_end}p" "$DC_FILE" | grep -q "drm_dev_enter"; then
+		fail missing_drm_dev_enter_in_discovery "fb_helper dereference must be protected"
+	fi
 fi
 
 # Check CONFIG_DRM_FBDEV_EMULATION guard
@@ -118,4 +194,5 @@ echo "PASS gate2 dc_sun4i structure validated"
 echo "  dc_sun4i.c: $(wc -l < "$DC_FILE") lines"
 echo "  Kbuild.mk: $(wc -l < "$KBUILD_FILE") lines"
 echo "  DC API functions: 12/12 present"
+echo "  Lifecycle: teardown ordering (unlock<exit<put), psOwner cached, discovery protected"
 echo "  Build integration: Makefile + build-sunxi-a133.sh"
