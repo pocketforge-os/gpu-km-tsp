@@ -1,152 +1,230 @@
 #!/bin/bash
-# Gate 1 (tsp-a33282eedd2009fe2d24): pvrsrvkm.ko and dc_sun4i.ko must build for a configured Linux 7.x tree.
-# Verifies Linux 7.2 fbdev API compatibility, vermagic, and symbol loadability.
+# Gate 1: pvrsrvkm.ko and dc_sun4i.ko must build against the exact pinned Linux 7.x tree.
 #
-# EXACT-BUILD PROVENANCE:
-#   This gate verifies that modules are built against the exact pinned kernel tree.
-#   1. Capture exact source HEAD, reject any tracked or untracked dirt
-#   2. Verify kernel tree is configured with .config
-#   3. Record .config SHA256 and kernel release
-#   4. Generate Module.symvers from vmlinux.symvers + modules-only.symvers (already in tree)
-#   5. Build modules against the kernel tree (kbuild consumes KERNELDIR/Module.symvers)
-#   6. Fatal modpost proves CRC/namespace match for all imports
-#   7. Recheck source HEAD/config after build, detect races
-#   8. Emit full provenance: source commit, config SHA256, kernel release, all hashes
+# SAME-INVOCATION BUILD PROVENANCE:
+#   This gate builds ALL ABI evidence in this single invocation:
+#   1. Capture exact source HEAD from KERNELDIR (git repo identity only)
+#   2. Capture .config SHA256 from KERNELDIR
+#   3. Reject tracked/staged dirt in KERNELDIR source tree
+#   4. Materialize pinned source into private temp worktree at exact commit
+#   5. Create private output directory, copy .config, run olddefconfig
+#   6. Build vmlinux + modules in private output (generates symvers)
+#   7. Combine vmlinux.symvers + modules-only.symvers -> Module.symvers in output
+#   8. Build PVR modules against the output directory (fatal modpost)
+#   9. Record all hashes: source commit, config, symvers, modules
+#  10. Recheck source HEAD/config after build (race detection)
+#  11. KERNELDIR source tree is never mutated (all build output in temp)
 #
-# Usage: tests/gate1-km-7x-build.sh [KERNEL_SOURCE_DIR]   (default: ../kernel-sunxi-7.x)
+# Usage: tests/gate1-km-7x-build.sh [KERNEL_SOURCE_DIR]
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 KERNELDIR="${1:-$(cd "$HERE/../kernel-sunxi-7.x" && pwd)}"
 export CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
 NM="${CROSS_COMPILE}nm"
-WORKDIR="$(mktemp -d /tmp/gate1-work-XXXXXX)"
-trap 'rm -rf "$WORKDIR"' EXIT
+JOBS="${PF_GATE1_JOBS:-$(nproc)}"
+
+START_TIME=$(date +%s)
+
+# Create private temp work directory (never a fixed path)
+WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/gate1-XXXXXX")"
+cleanup() {
+	if [ "${GATE1_KEEP:-0}" = "1" ]; then
+		echo "gate1: keeping workdir $WORKDIR (GATE1_KEEP=1)" >&2
+	else
+		rm -rf "$WORKDIR"
+	fi
+}
+trap cleanup EXIT
 
 fail() { echo "FAIL gate1 reason=$1 ${2:-}"; exit 1; }
 
-echo "gate1: exact-build provenance enabled" >&2
-echo "gate1: KERNELDIR=$KERNELDIR" >&2
+echo "gate1: same-invocation build provenance" >&2
+echo "gate1: KERNELDIR=$KERNELDIR (identity source only)" >&2
 
-# --- STEP 1: Verify source tree is clean git repo at known commit ---
+# =====================================================================
+# STEP 1: Capture KERNELDIR source identity (git repo/ref only)
+# =====================================================================
 [ -e "$KERNELDIR/.git" ] || fail kernel_source_not_git_repo "$KERNELDIR"
 
 src_commit=$(git -C "$KERNELDIR" rev-parse HEAD 2>/dev/null) || fail cannot_get_source_commit
 echo "gate1: src_commit=$src_commit" >&2
 
-# Reject ANY dirt in source tree (tracked or untracked)
+# Clean up any stale gate1 artifacts from previous runs in KERNELDIR
+for stale in Module.symvers.gate1; do
+	if [ -f "$KERNELDIR/$stale" ]; then
+		rm -f "$KERNELDIR/$stale"
+		echo "gate1: removed stale artifact $stale" >&2
+	fi
+done
+
+# Reject tracked/staged dirt (source identity must be stable)
 if ! git -C "$KERNELDIR" diff --quiet 2>/dev/null; then
 	fail source_tree_dirty "tracked changes: $(git -C "$KERNELDIR" diff --name-only)"
 fi
 if ! git -C "$KERNELDIR" diff --cached --quiet 2>/dev/null; then
 	fail source_tree_dirty "staged changes: $(git -C "$KERNELDIR" diff --cached --name-only)"
 fi
-# Allow only specific build artifacts that are expected from in-tree build
-untracked=$(git -C "$KERNELDIR" ls-files --others --exclude-standard | grep -v -E '^(Module\.symvers|Module\.symvers\.gate1|vmlinux\.symvers|modules-only\.symvers|\.config)$' || true)
-if [ -n "$untracked" ]; then
-	fail source_tree_dirty "untracked files: $untracked"
-fi
 src_clean=true
 echo "gate1: source_clean=$src_clean" >&2
 
-# --- STEP 2: Verify kernel tree is configured ---
+# Capture input .config identity
 config_file="$KERNELDIR/.config"
-[ -f "$config_file" ] || fail kernel_config_missing "run 'make defconfig' first"
-config_sha256=$(sha256sum "$config_file" | cut -d' ' -f1)
-echo "gate1: config_sha256=$config_sha256" >&2
+[ -f "$config_file" ] || fail kernel_config_missing "$config_file"
+input_config_sha256=$(sha256sum "$config_file" | cut -d' ' -f1)
+echo "gate1: input_config_sha256=$input_config_sha256" >&2
 
-[ -f "$KERNELDIR/include/generated/autoconf.h" ] || fail kernel_tree_not_configured "$KERNELDIR"
-rel=$(cat "$KERNELDIR/include/config/kernel.release" 2>/dev/null) || fail kernel_release_missing
+# =====================================================================
+# STEP 2: Materialize exact source into private temp worktree
+# =====================================================================
+KSRC="$WORKDIR/kernel-src"
+KOUT="$WORKDIR/kernel-out"
+mkdir -p "$KSRC" "$KOUT"
+
+echo "gate1: archiving source at $src_commit into $KSRC" >&2
+git -C "$KERNELDIR" archive --format=tar "$src_commit" | tar -xf - -C "$KSRC"
+
+# Verify archive identity
+archive_commit=$(git -C "$KSRC" rev-parse HEAD 2>/dev/null || echo "not-a-git-repo")
+# For git archive, the result is not a git repo. Verify by checking a known file exists.
+[ -f "$KSRC/Makefile" ] || fail archive_missing_makefile
+[ -f "$KSRC/Kbuild" ] || fail archive_missing_kbuild
+echo "gate1: source materialized ($archive_commit)" >&2
+
+# =====================================================================
+# STEP 3: Configure private output directory
+# =====================================================================
+cp "$config_file" "$KOUT/.config"
+echo "gate1: running olddefconfig in $KOUT" >&2
+make -C "$KSRC" O="$KOUT" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" \
+	olddefconfig >"$WORKDIR/olddefconfig.log" 2>&1 || fail olddefconfig_failed
+
+# Record effective config after olddefconfig
+effective_config_sha256=$(sha256sum "$KOUT/.config" | cut -d' ' -f1)
+echo "gate1: effective_config_sha256=$effective_config_sha256" >&2
+
+# Run prepare to generate kernel.release and other prerequisites
+echo "gate1: running prepare in $KOUT" >&2
+make -C "$KSRC" O="$KOUT" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" \
+	prepare >"$WORKDIR/prepare.log" 2>&1 || fail prepare_failed
+
+# Record kernel release
+rel=$(cat "$KOUT/include/config/kernel.release" 2>/dev/null) || fail kernel_release_missing
 case "$rel" in 7.*) ;; *) fail kernel_not_7x "release=$rel";; esac
 echo "gate1: kernel_release=$rel" >&2
 
-# --- STEP 3: Generate Module.symvers from existing symvers ---
-# Verify symvers files exist in kernel tree (generated by prior in-tree build)
-[ -f "$KERNELDIR/vmlinux.symvers" ] || fail vmlinux_symvers_missing
-[ -f "$KERNELDIR/modules-only.symvers" ] || fail modules_only_symvers_missing
+# =====================================================================
+# STEP 4: Build kernel in private output (generates symvers)
+# =====================================================================
+echo "gate1: building vmlinux + modules in $KOUT (jobs=$JOBS)" >&2
+make -C "$KSRC" O="$KOUT" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" \
+	-j"$JOBS" vmlinux modules >"$WORKDIR/kernel-build.log" 2>&1 \
+	|| fail kernel_build_failed "log=$WORKDIR/kernel-build.log"
 
-# Record input symvers SHA256s
-vmlinux_symvers_sha256=$(sha256sum "$KERNELDIR/vmlinux.symvers" | cut -d' ' -f1)
-modules_symvers_sha256=$(sha256sum "$KERNELDIR/modules-only.symvers" | cut -d' ' -f1)
-echo "gate1: vmlinux.symvers_sha256=$vmlinux_symvers_sha256" >&2
-echo "gate1: modules-only.symvers_sha256=$modules_symvers_sha256" >&2
+# =====================================================================
+# STEP 5: Verify and validate Module.symvers
+# =====================================================================
+# Linux 7.x generates Module.symvers directly (not separate vmlinux.symvers + modules-only.symvers)
+# If separate files exist, combine them; otherwise use Module.symvers directly
 
-# Combine symvers into KERNELDIR/Module.symvers (kbuild reads this file)
-SYMVERS_COMBINED="$WORKDIR/Module.symvers.combined"
-cat "$KERNELDIR/vmlinux.symvers" "$KERNELDIR/modules-only.symvers" | sort -t$'\t' -k2,2 > "$SYMVERS_COMBINED"
+if [ -f "$KOUT/vmlinux.symvers" ] && [ -f "$KOUT/modules-only.symvers" ]; then
+	# Combine separate symvers files (older kernel style)
+	echo "gate1: combining separate symvers files" >&2
+	cat "$KOUT/vmlinux.symvers" "$KOUT/modules-only.symvers" | sort -t$'\t' -k2,2 > "$KOUT/Module.symvers.combined"
 
-# Validate: reject duplicate symbols with conflicting CRC or namespace
-awk -F'\t' '
-{
-	key = $2
-	crc = $1
-	ns = (NF >= 5) ? $5 : ""
-	if (key in seen_crc) {
-		if (seen_crc[key] != crc) {
-			print "CRC mismatch for symbol: " key > "/dev/stderr"
-			exit 1
-		}
-		if (seen_ns[key] != ns) {
-			print "Namespace mismatch for symbol: " key > "/dev/stderr"
-			exit 1
-		}
-	} else {
-		seen_crc[key] = crc
-		seen_ns[key] = ns
+	vmlinux_symvers_sha256=$(sha256sum "$KOUT/vmlinux.symvers" | cut -d' ' -f1)
+	modules_symvers_sha256=$(sha256sum "$KOUT/modules-only.symvers" | cut -d' ' -f1)
+	echo "gate1: vmlinux_symvers_sha256=$vmlinux_symvers_sha256" >&2
+	echo "gate1: modules_symvers_sha256=$modules_symvers_sha256" >&2
+
+	# Reject duplicate symbols with conflicting CRC or namespace
+	awk -F'\t' '
+	{
+		key = $2; crc = $1; ns = (NF >= 5) ? $5 : ""
+		if (key in seen_crc) {
+			if (seen_crc[key] != crc) { print "CRC mismatch: " key > "/dev/stderr"; exit 1 }
+			if (seen_ns[key] != ns) { print "Namespace mismatch: " key > "/dev/stderr"; exit 1 }
+		} else { seen_crc[key] = crc; seen_ns[key] = ns }
 	}
-}
-END { print NR }
-' "$SYMVERS_COMBINED" > "$WORKDIR/symvers_count.txt" || fail duplicate_symbols_conflicting
+	END { print NR }
+	' "$KOUT/Module.symvers.combined" > "$WORKDIR/symvers_count.txt" || fail duplicate_symbols_conflicting
 
-# Deduplicate (safe since we validated no conflicts)
-sort -t$'\t' -k2,2 -u "$SYMVERS_COMBINED" > "$SYMVERS_COMBINED.dedup"
-mv "$SYMVERS_COMBINED.dedup" "$SYMVERS_COMBINED"
+	sort -t$'\t' -k2,2 -u "$KOUT/Module.symvers.combined" > "$KOUT/Module.symvers"
+	rm -f "$KOUT/Module.symvers.combined"
 
-symvers_count=$(cat "$WORKDIR/symvers_count.txt")
+	symvers_count=$(cat "$WORKDIR/symvers_count.txt")
+else
+	# Module.symvers generated directly by kernel build (Linux 7.x style)
+	[ -f "$KOUT/Module.symvers" ] || fail module_symvers_missing
+	[ -s "$KOUT/Module.symvers" ] || fail module_symvers_empty
 
-# Copy to KERNELDIR/Module.symvers - this is what kbuild reads
-cp "$SYMVERS_COMBINED" "$KERNELDIR/Module.symvers"
-final_symvers_sha256=$(sha256sum "$KERNELDIR/Module.symvers" | cut -d' ' -f1)
-echo "gate1: combined Module.symvers ($symvers_count entries)" >&2
-echo "gate1: final_module_symvers_sha256=$final_symvers_sha256" >&2
+	# Check for duplicates and count
+	awk -F'\t' '
+	{
+		key = $2; crc = $1; ns = (NF >= 5) ? $5 : ""
+		if (key in seen_crc) {
+			if (seen_crc[key] != crc) { print "CRC mismatch: " key > "/dev/stderr"; exit 1 }
+			if (seen_ns[key] != ns) { print "Namespace mismatch: " key > "/dev/stderr"; exit 1 }
+		} else { seen_crc[key] = crc; seen_ns[key] = ns }
+	}
+	END { print NR }
+	' "$KOUT/Module.symvers" > "$WORKDIR/symvers_count.txt" || fail duplicate_symbols_conflicting
 
-# --- STEP 4: Build PVR modules against KERNELDIR ---
+	symvers_count=$(cat "$WORKDIR/symvers_count.txt")
+	vmlinux_symvers_sha256="N/A-direct"
+	modules_symvers_sha256="N/A-direct"
+	echo "gate1: kernel build generated Module.symvers directly ($symvers_count entries)" >&2
+fi
+
+final_symvers_sha256=$(sha256sum "$KOUT/Module.symvers" | cut -d' ' -f1)
+echo "gate1: Module.symvers ($symvers_count entries, sha256=$final_symvers_sha256)" >&2
+
+# =====================================================================
+# STEP 6: Build PVR modules against the private output directory
+# =====================================================================
 rm -f "$HERE/pvrsrvkm.ko" "$HERE/dc_sun4i.ko"
 unset KBUILD_MODPOST_WARN 2>/dev/null || true
 
-PVR_DC_SUN4I=1 "$HERE/build-sunxi-a133.sh" "$KERNELDIR" >"$WORKDIR/build.log" 2>&1 \
+echo "gate1: building PVR modules against $KOUT" >&2
+PVR_DC_SUN4I=1 "$HERE/build-sunxi-a133.sh" "$KOUT" >"$WORKDIR/build.log" 2>&1 \
 	|| { cp "$WORKDIR/build.log" "$HERE/gate1-build.log"; fail module_build_failed "log=$HERE/gate1-build.log"; }
 
-# Verify both modules exist
 [ -f "$HERE/pvrsrvkm.ko" ] || fail pvrsrvkm_module_missing
 [ -f "$HERE/dc_sun4i.ko" ] || fail dc_sun4i_module_missing
 
-# Compute module hashes
 pvrsrvkm_sha256=$(sha256sum "$HERE/pvrsrvkm.ko" | cut -d' ' -f1)
 dc_sun4i_sha256=$(sha256sum "$HERE/dc_sun4i.ko" | cut -d' ' -f1)
 
-# Verify vermagic matches kernel release for both modules
+# Verify vermagic
 vm_pvrsrvkm=$(modinfo -F vermagic "$HERE/pvrsrvkm.ko" 2>/dev/null) || fail modinfo_failed_pvrsrvkm
 case "$vm_pvrsrvkm" in "$rel"*) ;; *) fail vermagic_mismatch_pvrsrvkm "vermagic=$vm_pvrsrvkm release=$rel";; esac
 
 vm_dc_sun4i=$(modinfo -F vermagic "$HERE/dc_sun4i.ko" 2>/dev/null) || fail modinfo_failed_dc_sun4i
 case "$vm_dc_sun4i" in "$rel"*) ;; *) fail vermagic_mismatch_dc_sun4i "vermagic=$vm_dc_sun4i release=$rel";; esac
 
-# --- STEP 5: Race detection - recheck identities after build ---
+# =====================================================================
+# STEP 7: Recheck source identity (race detection)
+# =====================================================================
 src_commit_after=$(git -C "$KERNELDIR" rev-parse HEAD 2>/dev/null) || fail cannot_recheck_source_commit
 if [ "$src_commit" != "$src_commit_after" ]; then
 	fail source_commit_changed_during_build "before=$src_commit after=$src_commit_after"
 fi
 
-config_sha256_after=$(sha256sum "$config_file" | cut -d' ' -f1)
-if [ "$config_sha256" != "$config_sha256_after" ]; then
-	fail config_changed_during_build "before=$config_sha256 after=$config_sha256_after"
+if ! git -C "$KERNELDIR" diff --quiet 2>/dev/null; then
+	fail source_tree_dirty_during_build "tracked changes appeared"
 fi
 
-echo "gate1: race detection passed - all identities stable" >&2
+config_sha256_after=$(sha256sum "$config_file" | cut -d' ' -f1)
+if [ "$input_config_sha256" != "$config_sha256_after" ]; then
+	fail config_changed_during_build "before=$input_config_sha256 after=$config_sha256_after"
+fi
 
-# --- STEP 6: Fail-closed symbol verification ---
+echo "gate1: race detection passed" >&2
 
-# Step 6a: Capture nm -u output for both modules
+# =====================================================================
+# STEP 8: Fail-closed symbol verification (supplementary to fatal modpost)
+# =====================================================================
+
+# Capture nm -u for both modules
 if ! "$NM" -u "$HERE/pvrsrvkm.ko" >"$WORKDIR/pvrsrvkm_undef.txt" 2>"$WORKDIR/pvrsrvkm_nm.err"; then
 	fail nm_failed_pvrsrvkm "err=$(cat "$WORKDIR/pvrsrvkm_nm.err")"
 fi
@@ -163,7 +241,7 @@ awk '{print $NF}' "$WORKDIR/dc_sun4i_undef.txt" | sort -u > "$WORKDIR/dc_sun4i_u
 pvrsrvkm_count=$(wc -l < "$WORKDIR/pvrsrvkm_undef.norm")
 dc_sun4i_count=$(wc -l < "$WORKDIR/dc_sun4i_undef.norm")
 
-# Step 6b: Check for forbidden private fbdev symbols
+# Check for forbidden private fbdev symbols
 forbidden="registered_fb get_fb_info put_fb_info fb_con_dpi"
 for sym in $forbidden; do
 	if grep -qxF "$sym" "$WORKDIR/dc_sun4i_undef.norm" || grep -qxF "$sym" "$WORKDIR/pvrsrvkm_undef.norm"; then
@@ -171,8 +249,8 @@ for sym in $forbidden; do
 	fi
 done
 
-# Step 6c: Name-level verification - verify undefined symbols appear in Module.symvers
-awk -F'\t' '{print $2}' "$KERNELDIR/Module.symvers" | sort -u > "$WORKDIR/kernel_exports.txt"
+# Name-level verification against Module.symvers in output dir
+awk -F'\t' '{print $2}' "$KOUT/Module.symvers" | sort -u > "$WORKDIR/kernel_exports.txt"
 "$NM" --defined-only "$HERE/pvrsrvkm.ko" 2>/dev/null | awk '/ [TtDdBb] / {print $NF}' | sort -u > "$WORKDIR/pvrsrvkm_exports.txt" || true
 
 # Verify dc_sun4i undefined symbols exist in kernel exports + pvrsrvkm exports
@@ -201,21 +279,32 @@ fi
 
 kernel_export_count=$(wc -l < "$WORKDIR/kernel_exports.txt")
 
+# Verify KERNELDIR source tree was NOT mutated (no tracked changes from gate1)
+if ! git -C "$KERNELDIR" diff --quiet 2>/dev/null; then
+	fail caller_source_tree_mutated "gate1 must not modify KERNELDIR tracked files"
+fi
+
+END_TIME=$(date +%s)
+WALL_TIME=$((END_TIME - START_TIME))
+
 echo "PASS gate1 release=$rel"
-echo "  EXACT-BUILD PROVENANCE:"
+echo "  SAME-INVOCATION BUILD PROVENANCE:"
 echo "    source_commit=$src_commit source_clean=$src_clean"
-echo "    config_sha256=$config_sha256"
+echo "    input_config_sha256=$input_config_sha256"
+echo "    effective_config_sha256=$effective_config_sha256"
 echo "    kernel_release=$rel"
 echo "    vmlinux_symvers_sha256=$vmlinux_symvers_sha256"
 echo "    modules_symvers_sha256=$modules_symvers_sha256"
 echo "    final_module_symvers_sha256=$final_symvers_sha256"
 echo "    race_detection=passed"
+echo "    caller_tree_unmutated=true"
+echo "    wall_time_seconds=$WALL_TIME"
 echo "  MODULES:"
 echo "    pvrsrvkm.ko: vermagic=$vm_pvrsrvkm sha256=$pvrsrvkm_sha256"
 echo "    dc_sun4i.ko: vermagic=$vm_dc_sun4i sha256=$dc_sun4i_sha256"
 echo "  VERIFICATION:"
-echo "    Modversion ABI proof: fatal modpost against KERNELDIR/Module.symvers ($symvers_count entries)"
+echo "    Modversion ABI proof: fatal modpost against $KOUT/Module.symvers ($symvers_count entries)"
 echo "    kernel_exports=$kernel_export_count"
 echo "    Private symbols: NONE (verified registered_fb, get_fb_info, put_fb_info absent)"
 echo "    Undefined symbols: dc_sun4i=$dc_sun4i_count pvrsrvkm=$pvrsrvkm_count (all CRC-verified via modpost)"
-echo "    Name verification: supplementary check confirms all undefined symbols exist in KERNELDIR/Module.symvers"
+echo "    Name verification: supplementary check confirms all undefined symbols exist in Module.symvers"
