@@ -129,6 +129,62 @@ run_test "truncated-record: short in_hex -> malformed exit 1" \
     "$FIXDIR/truncated-record" \
     1 "malformed"
 
+# --- New finding (continuation review): exact payload validation ---
+
+# 5a: unexpected phase (phase="error")
+run_test "unexpected-phase: phase=error -> malformed exit 1" \
+    "$FIXDIR/unexpected-phase" \
+    1 "malformed"
+
+# 5b: non-numeric bridge_seq
+run_test "nonnumeric-seq: bridge_seq=abc -> malformed exit 1" \
+    "$FIXDIR/nonnumeric-seq" \
+    1 "malformed"
+
+# 5c: overlong in_hex (26 chars, need exactly 24)
+run_test "overlong-in-hex: 26 chars -> malformed exit 1" \
+    "$FIXDIR/overlong-in-hex" \
+    1 "malformed"
+
+# 5d: overlong out_hex (10 chars, need exactly 8)
+run_test "overlong-out-hex: 10 chars -> malformed exit 1" \
+    "$FIXDIR/overlong-out-hex" \
+    1 "malformed"
+
+# 5e: odd-length in_hex (23 chars, odd and != 24)
+run_test "odd-length-in-hex: 23 chars -> malformed exit 1" \
+    "$FIXDIR/odd-length-in-hex" \
+    1 "malformed"
+
+# 5f: odd-length out_hex (7 chars, odd and != 8)
+run_test "odd-length-out-hex: 7 chars -> malformed exit 1" \
+    "$FIXDIR/odd-length-out-hex" \
+    1 "malformed"
+
+# 5g: unreadable evidence file -> read_error exit 1
+# Test only if not running as root (root can read chmod 000 files)
+total=$((total + 1))
+if [ "$(id -u)" -eq 0 ]; then
+    echo "SKIP: unreadable-evidence (running as root, cannot test chmod 000)"
+    pass=$((pass + 1))  # count as pass since we can't test it
+else
+    chmod 000 "$FIXDIR/unreadable-evidence/syscall-trace-A.txt"
+    output=""
+    rc=0
+    output=$(bash "$PARSER" "$FIXDIR/unreadable-evidence/trace-summary.txt" 2>&1) || rc=$?
+    chmod 644 "$FIXDIR/unreadable-evidence/syscall-trace-A.txt"  # restore
+
+    got_disp=$(printf '%s\n' "$output" | grep "^disposition=" | tail -n 1 | cut -d= -f2)
+    if [ "$rc" -ne 0 ] && [ "$got_disp" = "read_error" ]; then
+        echo "PASS: unreadable-evidence: read_error exit $rc"
+        pass=$((pass + 1))
+    else
+        echo "FAIL: unreadable-evidence: expected disposition=read_error exit!=0, got disposition=$got_disp exit=$rc"
+        printf '%s\n' "$output" | sed 's/^/  /'
+        fail=$((fail + 1))
+    fi
+fi
+
 # --- Preserved r6 behavior ---
 run_test "r6-mimic: 9 TIMEOUTs, 3 clusters + 3 OK-only -> expected_polling" \
     "$FIXDIR/r6-mimic" \

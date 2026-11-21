@@ -15,6 +15,9 @@
 #           no bridge calls at all -> disposition=no_fences (exit 0).
 #
 # Fail-closed: unmatched BEFORE/AFTER or malformed records -> disposition=malformed (exit 1).
+# Malformed: unexpected phase, non-numeric bridge_seq, wrong-length payloads
+#            (in_hex must be exactly 24 hex chars, out_hex exactly 8 hex chars).
+# Read error: unreadable/missing evidence -> disposition=read_error (exit 1).
 #
 # IMG_HANDLE: full 64-bit little-endian decode from bridge struct bytes 0-7.
 set -euo pipefail
@@ -76,8 +79,23 @@ extract_field() {
     printf '%s' "$val"
 }
 
-# --- Phase 1: grep bridge lines safely (no-match -> empty, not pipefail death) ---
-bridge_lines=$(grep "bridge_id=24 bridge_func_id=5" "$SYSTRACE" || true)
+# --- Phase 1: grep bridge lines safely ---
+# Distinguish grep status 1 (no match) from status 2+ (read/usage error).
+# Only status 1 produces no_fences; any other failure is read_error.
+bridge_lines=""
+grep_rc=0
+bridge_lines=$(grep "bridge_id=24 bridge_func_id=5" "$SYSTRACE" 2>/dev/null) || grep_rc=$?
+
+if [ "$grep_rc" -eq 1 ]; then
+    echo "no SYNCFBFENCEWAIT bridge calls found in syscall trace"
+    echo "disposition=no_fences"
+    exit 0
+elif [ "$grep_rc" -ne 0 ]; then
+    echo "failed to read syscall trace: $SYSTRACE (grep exit=$grep_rc)" >&2
+    echo "disposition=read_error"
+    echo "reason=grep_failed_exit=$grep_rc"
+    exit 1
+fi
 
 if [ -z "$bridge_lines" ]; then
     echo "no SYNCFBFENCEWAIT bridge calls found in syscall trace"
@@ -92,8 +110,23 @@ while IFS= read -r line; do
     phase=$(extract_field "phase" "$line")
     seq=$(extract_field "bridge_seq" "$line")
 
+    # Missing fields
     if [ -z "$phase" ] || [ -z "$seq" ]; then
         echo "MALFORMED: missing phase or bridge_seq" >> "$errors"
+        malformed_count=$((malformed_count + 1))
+        continue
+    fi
+
+    # bridge_seq must be a non-negative integer
+    if ! [[ "$seq" =~ ^[0-9]+$ ]]; then
+        echo "MALFORMED: non-numeric bridge_seq=$seq" >> "$errors"
+        malformed_count=$((malformed_count + 1))
+        continue
+    fi
+
+    # Phase must be exactly "before" or "after" (unexpected phase -> malformed)
+    if [ "$phase" != "before" ] && [ "$phase" != "after" ]; then
+        echo "MALFORMED: unexpected phase=$phase seq=$seq" >> "$errors"
         malformed_count=$((malformed_count + 1))
         continue
     fi
@@ -111,9 +144,16 @@ while IFS= read -r line; do
             malformed_count=$((malformed_count + 1))
             continue
         fi
-        # Struct: 8 bytes handle + 4 bytes timeout = 24 hex chars minimum
-        if [ "${#in_hex}" -lt 24 ]; then
-            echo "MALFORMED before seq=$seq: in_hex too short (${#in_hex} chars, need >=24)" >> "$errors"
+        # Struct: 8 bytes handle + 4 bytes timeout = exactly 24 hex chars
+        in_hex_len=${#in_hex}
+        if [ "$in_hex_len" -ne 24 ]; then
+            echo "MALFORMED before seq=$seq: in_hex wrong length ($in_hex_len chars, need exactly 24)" >> "$errors"
+            malformed_count=$((malformed_count + 1))
+            continue
+        fi
+        # Even length check (defense-in-depth; exact 24 already implies even)
+        if [ $((in_hex_len % 2)) -ne 0 ]; then
+            echo "MALFORMED before seq=$seq: in_hex odd length ($in_hex_len)" >> "$errors"
             malformed_count=$((malformed_count + 1))
             continue
         fi
@@ -134,9 +174,16 @@ while IFS= read -r line; do
             malformed_count=$((malformed_count + 1))
             continue
         fi
-        # Struct: 4 bytes eError = 8 hex chars minimum
-        if [ "${#out_hex}" -lt 8 ]; then
-            echo "MALFORMED after seq=$seq: out_hex too short (${#out_hex} chars, need >=8)" >> "$errors"
+        # Struct: 4 bytes eError = exactly 8 hex chars
+        out_hex_len=${#out_hex}
+        if [ "$out_hex_len" -ne 8 ]; then
+            echo "MALFORMED after seq=$seq: out_hex wrong length ($out_hex_len chars, need exactly 8)" >> "$errors"
+            malformed_count=$((malformed_count + 1))
+            continue
+        fi
+        # Even length check (defense-in-depth; exact 8 already implies even)
+        if [ $((out_hex_len % 2)) -ne 0 ]; then
+            echo "MALFORMED after seq=$seq: out_hex odd length ($out_hex_len)" >> "$errors"
             malformed_count=$((malformed_count + 1))
             continue
         fi
