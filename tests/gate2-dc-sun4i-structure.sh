@@ -510,6 +510,30 @@ if ! grep -q "test_pass" "$GATE1_FILE" || ! grep -q "test_fail" "$GATE1_FILE"; t
 	fail gate1_validation_no_aggregation "validation mode must aggregate all test results"
 fi
 
+# 9g: Negative mutation - err_release_helper must NOT dereference gpsDeviceData after kfree
+# Extract err_release_helper block and verify state is cached BEFORE kfree
+ERR_RELEASE_HELPER_BLOCK=$(sed -n '/^err_release_helper:/,/^[a-z_]*:/p' "$DC_FILE" | head -n -1)
+# Check that there's a variable assignment (bShouldModulePut or similar) before kfree
+if ! echo "$ERR_RELEASE_HELPER_BLOCK" | grep -q "kfree(gpsDeviceData)"; then
+	fail err_release_helper_missing_kfree "err_release_helper must call kfree(gpsDeviceData)"
+fi
+# Verify that the module_put condition does NOT reference gpsDeviceData->eFBState
+# after kfree. Instead, it should use a cached boolean.
+MODULE_PUT_LINE=$(echo "$ERR_RELEASE_HELPER_BLOCK" | grep -A2 "kfree(gpsDeviceData)" | grep "module_put")
+if echo "$MODULE_PUT_LINE" | grep -q "gpsDeviceData->eFBState"; then
+	fail err_release_helper_uaf "err_release_helper must NOT dereference gpsDeviceData->eFBState after kfree (use-after-free)"
+fi
+# Verify that state is cached before kfree (look for assignment pattern before kfree)
+if ! echo "$ERR_RELEASE_HELPER_BLOCK" | awk '/kfree\(gpsDeviceData\)/{exit} 1' | grep -qE "(bShouldModulePut|bCacheState|eCachedState)\s*="; then
+	fail err_release_helper_no_cache "err_release_helper must cache state before kfree to prevent use-after-free"
+fi
+
+# 9h: Negative mutation - gate1 must detect PF_GATE1_JOBS presence, not emptiness
+# An explicitly empty override must fail validation, while unset uses bounded default
+if ! grep -q '${PF_GATE1_JOBS+x}' "$GATE1_FILE"; then
+	fail gate1_jobs_presence_detection "gate1 must use \${PF_GATE1_JOBS+x} to detect presence (not -n for non-empty)"
+fi
+
 echo "PASS gate2 dc_sun4i structure validated"
 echo "  dc_sun4i.c: $(wc -l < "$DC_FILE") lines"
 echo "  Kbuild.mk: $(wc -l < "$KBUILD_FILE") lines"

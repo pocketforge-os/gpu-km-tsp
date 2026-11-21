@@ -1232,12 +1232,14 @@ err_release_helper:
 	drm_dev_exit(init_drm_idx);
 	{
 		bool bReleaseOk = dc_sun4i_fb_release_once(gpsDeviceData);
+		/* Cache state BEFORE kfree to avoid use-after-free */
+		bool bShouldModulePut = bReleaseOk || (gpsDeviceData->eFBState != FB_RELEASE_TERMINAL);
 		if(gpsDeviceData->bNotifierRegistered)
 			bus_unregister_notifier(&platform_bus_type, &gpsDeviceData->sUnbindNotifier);
 		put_device(&gpsDeviceData->psPlatformDev->dev);
 		kfree(gpsDeviceData);
-		/* Only module_put if fb_release completed successfully */
-		if(bReleaseOk || gpsDeviceData->eFBState != FB_RELEASE_TERMINAL)
+		/* Only module_put if fb_release completed successfully (evaluated before kfree) */
+		if(bShouldModulePut)
 			module_put(psOwner);
 		else
 			pr_err("dc_sun4i: init unwind - module ref leaked (fb_release incomplete)");

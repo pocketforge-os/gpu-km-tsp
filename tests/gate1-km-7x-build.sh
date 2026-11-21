@@ -76,9 +76,11 @@ resolve_jobs() {
 }
 
 # Resolve jobs (fatal on invalid input)
-if [ -n "${PF_GATE1_JOBS:-}" ]; then
+# Use ${PF_GATE1_JOBS+x} to detect presence (not emptiness): an explicitly empty
+# override must fail validation, while a genuinely unset variable uses bounded default.
+if [ "${PF_GATE1_JOBS+x}" ]; then
 	if ! resolve_jobs "$PF_GATE1_JOBS"; then
-		echo "FAIL gate1 reason=invalid_jobs PF_GATE1_JOBS=$PF_GATE1_JOBS (must be positive integer <= $GATE1_HARD_MAX_JOBS)" >&2
+		echo "FAIL gate1 reason=invalid_jobs PF_GATE1_JOBS='$PF_GATE1_JOBS' (must be positive integer <= $GATE1_HARD_MAX_JOBS)" >&2
 		exit 1
 	fi
 else
