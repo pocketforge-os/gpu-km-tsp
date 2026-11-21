@@ -127,24 +127,39 @@ static DC_SUN4I_DEVICE *gpsDeviceData;
  * fb_info through the public DRM path: find the sun4i-drm platform device,
  * get its drm_device, and access fb_helper->info.
  *
+ * Supported compatible strings:
+ * - allwinner,sun4i-a10-display-engine (A10/A20)
+ * - allwinner,sun8i-a33-display-engine (A33)
+ * - allwinner,sun50i-a100-display-engine (A100/A133)
+ *
  * Returns fb_info pointer on success, NULL on failure.
+ *
+ * Lifetime note: The returned fb_info pointer is valid as long as:
+ * 1. The fbdev owner module is held (try_module_get on fbops->owner)
+ * 2. The DRM driver remains bound (device-specific module assumption)
+ *
+ * This is safe for device-specific display controller modules that are
+ * tightly coupled to the DRM driver for the same hardware.
  */
 static struct fb_info *dc_sun4i_find_fb_info(void)
 {
-	struct device_node *np;
+	struct device_node *np = NULL;
 	struct platform_device *pdev;
 	struct device *dev;
 	struct drm_device *drm;
 	struct fb_info *info = NULL;
 
-	/* Find the sun4i-drm device by compatible string */
+	/* Find the sun4i-drm device by compatible string (A10, A33, or A100) */
 	np = of_find_compatible_node(NULL, NULL, "allwinner,sun4i-a10-display-engine");
 	if (!np) {
-		/* Try A33-specific compatible */
 		np = of_find_compatible_node(NULL, NULL, "allwinner,sun8i-a33-display-engine");
 	}
 	if (!np) {
-		pr_err("dc_sun4i: no compatible sun4i-drm device found\n");
+		/* A133 uses A100 display engine */
+		np = of_find_compatible_node(NULL, NULL, "allwinner,sun50i-a100-display-engine");
+	}
+	if (!np) {
+		pr_err("dc_sun4i: no compatible sun4i-drm device found (tried A10/A33/A100)\n");
 		return NULL;
 	}
 
@@ -160,21 +175,27 @@ static struct fb_info *dc_sun4i_find_fb_info(void)
 	dev = &pdev->dev;
 	drm = dev_get_drvdata(dev);
 	if (!drm) {
-		pr_err("dc_sun4i: no drm_device in drvdata\n");
+		pr_err("dc_sun4i: no drm_device in drvdata - sun4i-drm not fully initialized\n");
+		put_device(&pdev->dev);
 		return NULL;
 	}
 
 	/* Access fb_info through drm_fb_helper (public fields) */
 	if (!drm->fb_helper) {
-		pr_err("dc_sun4i: no fb_helper in drm_device\n");
+		pr_err("dc_sun4i: no fb_helper in drm_device - fbdev emulation not ready\n");
+		put_device(&pdev->dev);
 		return NULL;
 	}
 
 	info = drm->fb_helper->info;
 	if (!info) {
-		pr_err("dc_sun4i: no fb_info in fb_helper\n");
+		pr_err("dc_sun4i: no fb_info in fb_helper - fbdev not initialized\n");
+		put_device(&pdev->dev);
 		return NULL;
 	}
+
+	/* Release platform device reference - we have what we need */
+	put_device(&pdev->dev);
 
 	return info;
 }

@@ -49,6 +49,14 @@ grep -q "dc_sun4i_find_fb_info" "$DC_FILE" || fail missing_fb_info_discovery
 grep -q "of_find_compatible_node" "$DC_FILE" || fail missing_of_find_compatible_node
 grep -q "drm->fb_helper->info" "$DC_FILE" || fail missing_drm_fb_helper_access
 
+# Check supported compatible strings (A10, A33, A100/A133)
+grep -q "allwinner,sun4i-a10-display-engine" "$DC_FILE" || fail missing_a10_compatible
+grep -q "allwinner,sun8i-a33-display-engine" "$DC_FILE" || fail missing_a33_compatible
+grep -q "allwinner,sun50i-a100-display-engine" "$DC_FILE" || fail missing_a100_compatible
+
+# Check reference balancing (put_device after of_find_device_by_node)
+grep -q "put_device" "$DC_FILE" || fail missing_put_device_reference_balance
+
 # Check CONFIG_DRM_FBDEV_EMULATION guard
 grep -q "#if !defined(CONFIG_DRM_FBDEV_EMULATION)" "$DC_FILE" || fail missing_CONFIG_DRM_FBDEV_EMULATION_guard
 
