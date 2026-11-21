@@ -12,6 +12,7 @@ FIXDIR="$SCRIPT_DIR/fixtures/syncfbfencewait"
 
 pass=0
 fail=0
+skip=0
 total=0
 
 run_test() {
@@ -199,7 +200,7 @@ run_test "wrong-out-size: out_size=8 -> malformed exit 1" \
 total=$((total + 1))
 if [ "$(id -u)" -eq 0 ]; then
     echo "SKIP: unreadable-evidence (running as root; chmod 000 does not prevent read)"
-    pass=$((pass + 1))  # still counted in total, but clearly marked SKIP above
+    skip=$((skip + 1))
 else
     # Create temp dir with trap for guaranteed cleanup
     _ue_tmpdir=$(mktemp -d)
@@ -247,10 +248,12 @@ if [ -f "$LIVE_R6_DIR/trace-summary.txt" ] && [ -f "$LIVE_R6_DIR/syscall-trace-A
         "total_timeout_returns=9"
 else
     echo "SKIP: live r6 evidence not available at $LIVE_R6_DIR"
+    total=$((total + 1))
+    skip=$((skip + 1))
 fi
 
 echo ""
-echo "=== Results: $pass passed, $fail failed, $total total ==="
+echo "=== Results: $pass passed, $fail failed, $skip skipped, $total total ==="
 
 if [ "$fail" -ne 0 ]; then
     exit 1
