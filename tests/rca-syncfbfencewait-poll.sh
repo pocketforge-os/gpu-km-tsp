@@ -5,6 +5,18 @@
 #
 # Usage: tests/rca-syncfbfencewait-poll.sh <trace-summary.txt>
 # The companion syscall-trace-A.txt must be in the same directory.
+#
+# Classification rules (exact):
+#   expected_polling cluster: EVERY wait has timeout=0 AND the FINAL wait has eerr=0 (OK).
+#   stuck_fence cluster:      any wait has timeout!=0 OR the FINAL wait has eerr!=0.
+#   Global: any stuck cluster -> disposition=stuck_fence (exit 1).
+#           all expected, total_timeout_returns>0 -> disposition=expected_polling (exit 0).
+#           all expected, total_timeout_returns==0 -> disposition=no_timeouts (exit 0).
+#           no bridge calls at all -> disposition=no_fences (exit 0).
+#
+# Fail-closed: unmatched BEFORE/AFTER or malformed records -> disposition=malformed (exit 1).
+#
+# IMG_HANDLE: full 64-bit little-endian decode from bridge struct bytes 0-7.
 set -euo pipefail
 
 TRACE="${1:-}"
@@ -13,104 +25,251 @@ TRACE="${1:-}"
 
 DIR=$(dirname "$TRACE")
 SYSTRACE="$DIR/syscall-trace-A.txt"
-[ -f "$SYSTRACE" ] || { echo "companion syscall trace not found" >&2; exit 2; }
+[ -f "$SYSTRACE" ] || { echo "companion syscall trace not found: $SYSTRACE" >&2; exit 2; }
 
-# h2d HEX: convert hex string to decimal using printf
-h2d() { printf '%d' "0x$1"; }
+# --- temp directory with cleanup ---
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
 
-# Process syscall trace to produce joined table: seq handle timeout eerr
-# Extract BEFORE and AFTER lines, match by seq
-tmp=$(mktemp)
-trap "rm -f $tmp" EXIT
+records="$tmpdir/records"    # joined: seq handle_hex timeout eerr
+b_seqs="$tmpdir/b_seqs"      # all BEFORE seq numbers
+a_seqs="$tmpdir/a_seqs"      # all AFTER seq numbers
+errors="$tmpdir/errors"      # malformed record diagnostics
+touch "$records" "$b_seqs" "$a_seqs" "$errors"
+malformed_count=0
 
-# BEFORE: extract seq, handle (byte 0 of in_hex), timeout (bytes 8-11 LE of in_hex)
-grep "bridge_id=24 bridge_func_id=5" "$SYSTRACE" | \
-while IFS= read -r line; do
-    phase=$(echo "$line" | sed -n 's/.* phase=\([^ ]*\) .*/\1/p')
-    seq=$(echo "$line" | sed -n 's/.* bridge_seq=\([^ ]*\) .*/\1/p')
-    if [ "$phase" = "before" ]; then
-        in_hex=$(echo "$line" | sed -n 's/.* in_hex=\([^ ]*\) .*/\1/p')
-        [ -n "$in_hex" ] && [ "$in_hex" != "-" ] || continue
-        handle=$(h2d "${in_hex:0:2}")
-        # Timeout: bytes 8-11 LE (chars 16-23)
-        b8=${in_hex:16:2}; b9=${in_hex:18:2}; b10=${in_hex:20:2}; b11=${in_hex:22:2}
-        timeout=$(( $(h2d "$b11") * 16777216 + $(h2d "$b10") * 65536 + $(h2d "$b9") * 256 + $(h2d "$b8") ))
-        echo "B $seq $handle $timeout"
-    elif [ "$phase" = "after" ]; then
-        out_hex=$(echo "$line" | sed -n 's/.* out_hex=\([^ ]*\) .*/\1/p')
-        [ -n "$out_hex" ] && [ "$out_hex" != "-" ] || continue
-        e0=${out_hex:0:2}; e1=${out_hex:2:2}; e2=${out_hex:4:2}; e3=${out_hex:6:2}
-        eerr=$(( $(h2d "$e3") * 16777216 + $(h2d "$e2") * 65536 + $(h2d "$e1") * 256 + $(h2d "$e0") ))
-        echo "A $seq $eerr"
-    fi
-done | sort -k2,2n > "$tmp"
+# --- hex helpers ---
+# Convert 2-char hex byte to decimal
+h2d_byte() { printf '%d' "0x${1}"; }
 
-# Join B and A records by seq
-joined=$(awk '
-/^B/ { handle[$2]=$3; timeout[$2]=$4; seqs[$2]=1 }
-/^A/ { eerr[$2]=$3 }
-END {
-    for (s in seqs) {
-        if (s in eerr) print s, handle[s], timeout[s], eerr[s]
-    }
-}' "$tmp" | sort -n)
+# Validate hex string: only [0-9a-fA-F], non-empty
+is_hex() {
+    local s="$1"
+    [ -n "$s" ] || return 1
+    [[ "$s" =~ ^[0-9a-fA-F]+$ ]]
+}
 
-if [ -z "$joined" ]; then
-    echo "no SYNCFBFENCEWAIT calls decoded"
+# Decode full 64-bit LE handle from chars 0-15 of in_hex.
+# Returns canonical uppercase hex string (16 chars, big-endian display order).
+decode_handle_64() {
+    local hx="$1"
+    local b0="${hx:0:2}" b1="${hx:2:2}" b2="${hx:4:2}" b3="${hx:6:2}"
+    local b4="${hx:8:2}" b5="${hx:10:2}" b6="${hx:12:2}" b7="${hx:14:2}"
+    # Canonical: reverse byte order (LE -> display)
+    printf '%s%s%s%s%s%s%s%s' "$b7" "$b6" "$b5" "$b4" "$b3" "$b2" "$b1" "$b0"
+}
+
+# Decode 4-byte LE uint32 from 8 hex chars
+decode_u32_le() {
+    local hx="$1"
+    local b0="${hx:0:2}" b1="${hx:2:2}" b2="${hx:4:2}" b3="${hx:6:2}"
+    echo $(( $(h2d_byte "$b3") * 16777216 + $(h2d_byte "$b2") * 65536 + $(h2d_byte "$b1") * 256 + $(h2d_byte "$b0") ))
+}
+
+# --- extract field from trace line ---
+# Usage: extract_field "field_name" "$line"
+extract_field() {
+    local fname="$1" line="$2"
+    # Match " field_name=value" followed by space or end-of-line
+    local val
+    val=$(printf '%s' "$line" | sed -n "s/.* ${fname}=\([^ ]*\).*/\1/p")
+    printf '%s' "$val"
+}
+
+# --- Phase 1: grep bridge lines safely (no-match -> empty, not pipefail death) ---
+bridge_lines=$(grep "bridge_id=24 bridge_func_id=5" "$SYSTRACE" || true)
+
+if [ -z "$bridge_lines" ]; then
+    echo "no SYNCFBFENCEWAIT bridge calls found in syscall trace"
     echo "disposition=no_fences"
     exit 0
 fi
 
-# Cluster by consecutive same-handle, compute disposition
+# --- Phase 2: parse BEFORE/AFTER records ---
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+
+    phase=$(extract_field "phase" "$line")
+    seq=$(extract_field "bridge_seq" "$line")
+
+    if [ -z "$phase" ] || [ -z "$seq" ]; then
+        echo "MALFORMED: missing phase or bridge_seq" >> "$errors"
+        malformed_count=$((malformed_count + 1))
+        continue
+    fi
+
+    if [ "$phase" = "before" ]; then
+        echo "$seq" >> "$b_seqs"
+        in_hex=$(extract_field "in_hex" "$line")
+        if [ -z "$in_hex" ] || [ "$in_hex" = "-" ]; then
+            echo "MALFORMED before seq=$seq: missing in_hex" >> "$errors"
+            malformed_count=$((malformed_count + 1))
+            continue
+        fi
+        if ! is_hex "$in_hex"; then
+            echo "MALFORMED before seq=$seq: in_hex not hex: $in_hex" >> "$errors"
+            malformed_count=$((malformed_count + 1))
+            continue
+        fi
+        # Struct: 8 bytes handle + 4 bytes timeout = 24 hex chars minimum
+        if [ "${#in_hex}" -lt 24 ]; then
+            echo "MALFORMED before seq=$seq: in_hex too short (${#in_hex} chars, need >=24)" >> "$errors"
+            malformed_count=$((malformed_count + 1))
+            continue
+        fi
+        handle_hex=$(decode_handle_64 "$in_hex")
+        timeout=$(decode_u32_le "${in_hex:16:8}")
+        echo "$seq $handle_hex $timeout" >> "$tmpdir/before"
+
+    elif [ "$phase" = "after" ]; then
+        echo "$seq" >> "$a_seqs"
+        out_hex=$(extract_field "out_hex" "$line")
+        if [ -z "$out_hex" ] || [ "$out_hex" = "-" ]; then
+            echo "MALFORMED after seq=$seq: missing out_hex" >> "$errors"
+            malformed_count=$((malformed_count + 1))
+            continue
+        fi
+        if ! is_hex "$out_hex"; then
+            echo "MALFORMED after seq=$seq: out_hex not hex: $out_hex" >> "$errors"
+            malformed_count=$((malformed_count + 1))
+            continue
+        fi
+        # Struct: 4 bytes eError = 8 hex chars minimum
+        if [ "${#out_hex}" -lt 8 ]; then
+            echo "MALFORMED after seq=$seq: out_hex too short (${#out_hex} chars, need >=8)" >> "$errors"
+            malformed_count=$((malformed_count + 1))
+            continue
+        fi
+        eerr=$(decode_u32_le "${out_hex:0:8}")
+        echo "$seq $eerr" >> "$tmpdir/after"
+    fi
+done <<< "$bridge_lines"
+
+# --- Phase 3: fail closed on malformed records ---
+if [ "$malformed_count" -gt 0 ]; then
+    echo "malformed_records=$malformed_count"
+    cat "$errors" >&2
+    echo "disposition=malformed"
+    echo "reason=malformed_records"
+    exit 1
+fi
+
+# --- Phase 4: detect missing before/after files ---
+if [ ! -f "$tmpdir/before" ] || [ ! -s "$tmpdir/before" ]; then
+    if [ -s "$a_seqs" ]; then
+        echo "disposition=malformed"
+        echo "reason=after_without_before"
+        exit 1
+    fi
+    echo "disposition=no_fences"
+    exit 0
+fi
+if [ ! -f "$tmpdir/after" ] || [ ! -s "$tmpdir/after" ]; then
+    echo "disposition=malformed"
+    echo "reason=before_without_after"
+    exit 1
+fi
+
+# --- Phase 5: join BEFORE/AFTER by seq, detect unmatched ---
+# Sort both files by seq
+sort -k1,1n "$tmpdir/before" > "$tmpdir/before_sorted"
+sort -k1,1n "$tmpdir/after" > "$tmpdir/after_sorted"
+
+# Join on seq (field 1)
+join -j 1 "$tmpdir/before_sorted" "$tmpdir/after_sorted" > "$records" 2>/dev/null || true
+
+# Check for unmatched BEFORE seqs
+join -v 1 -j 1 "$tmpdir/before_sorted" "$tmpdir/after_sorted" > "$tmpdir/unmatched_b" 2>/dev/null || true
+if [ -s "$tmpdir/unmatched_b" ]; then
+    unmatched_b_count=$(wc -l < "$tmpdir/unmatched_b")
+    echo "unmatched_before=$unmatched_b_count"
+    echo "disposition=malformed"
+    echo "reason=unmatched_before"
+    exit 1
+fi
+
+# Check for unmatched AFTER seqs
+join -v 2 -j 1 "$tmpdir/before_sorted" "$tmpdir/after_sorted" > "$tmpdir/unmatched_a" 2>/dev/null || true
+if [ -s "$tmpdir/unmatched_a" ]; then
+    unmatched_a_count=$(wc -l < "$tmpdir/unmatched_a")
+    echo "unmatched_after=$unmatched_a_count"
+    echo "disposition=malformed"
+    echo "reason=unmatched_after"
+    exit 1
+fi
+
+# Sort joined records by seq for chronological ordering
+sort -k1,1n "$records" > "$tmpdir/joined_sorted"
+
+if [ ! -s "$tmpdir/joined_sorted" ]; then
+    echo "disposition=no_fences"
+    exit 0
+fi
+
+# --- Phase 6: cluster by consecutive same-handle, classify ---
+# records format: seq handle_hex timeout eerr
 cluster_n=0
 any_stuck=0
 cur_handle=""
-timeouts=0
-total=0
-has_ok=0
-has_nz=0
+cluster_timeouts=0
+cluster_total=0
+cluster_all_zero_timeout=1
+cluster_last_eerr=""
 total_timeouts=0
 
-flush() {
+flush_cluster() {
     if [ -n "$cur_handle" ]; then
-        disp="expected_polling"
-        if [ "$has_ok" -eq 0 ] || [ "$has_nz" -ne 0 ]; then
+        local disp="expected_polling"
+        # expected_polling requires: ALL timeout=0 AND final eerr=0
+        if [ "$cluster_all_zero_timeout" -ne 1 ] || [ "$cluster_last_eerr" != "0" ]; then
             disp="stuck_fence"
             any_stuck=1
         fi
-        printf "cluster=%d handle=0x%02x timeouts=%d total=%d disposition=%s\n" \
-            "$cluster_n" "$cur_handle" "$timeouts" "$total" "$disp"
+        printf "cluster=%d handle=0x%s timeouts=%d total=%d disposition=%s\n" \
+            "$cluster_n" "$cur_handle" "$cluster_timeouts" "$cluster_total" "$disp"
     fi
 }
 
-while read -r seq handle timeout eerr; do
-    [ -z "$seq" ] && continue
-    if [ "$handle" != "$cur_handle" ]; then
-        flush
-        cluster_n=$((cluster_n + 1))
-        cur_handle=$handle
-        timeouts=0; total=0; has_ok=0; has_nz=0
-    fi
-    total=$((total + 1))
-    if [ "$eerr" -eq 9 ]; then
-        timeouts=$((timeouts + 1))
-        total_timeouts=$((total_timeouts + 1))
-        [ "$timeout" -ne 0 ] && has_nz=1
-    elif [ "$eerr" -eq 0 ]; then
-        has_ok=1
-    fi
-done <<< "$joined"
-flush
+while read -r seq handle_hex timeout eerr; do
+    [ -n "$seq" ] || continue
 
+    if [ "$handle_hex" != "$cur_handle" ]; then
+        flush_cluster
+        cluster_n=$((cluster_n + 1))
+        cur_handle="$handle_hex"
+        cluster_timeouts=0
+        cluster_total=0
+        cluster_all_zero_timeout=1
+        cluster_last_eerr=""
+    fi
+
+    cluster_total=$((cluster_total + 1))
+    cluster_last_eerr="$eerr"
+
+    # Count TIMEOUT returns (eerr=9)
+    if [ "$eerr" -eq 9 ]; then
+        cluster_timeouts=$((cluster_timeouts + 1))
+        total_timeouts=$((total_timeouts + 1))
+    fi
+
+    # Nonzero timeout is a violation regardless of eerr (finding #2)
+    if [ "$timeout" -ne 0 ]; then
+        cluster_all_zero_timeout=0
+    fi
+done < "$tmpdir/joined_sorted"
+flush_cluster
+
+# --- Phase 7: global disposition ---
 echo "---"
 echo "total_timeout_returns=$total_timeouts"
-if [ "$any_stuck" -eq 0 ] && [ "$total_timeouts" -gt 0 ]; then
-    echo "disposition=expected_polling"
-    exit 0
-elif [ "$total_timeouts" -eq 0 ]; then
-    echo "disposition=no_timeouts"
-    exit 0
-else
+
+if [ "$any_stuck" -ne 0 ]; then
     echo "disposition=stuck_fence"
     exit 1
+elif [ "$total_timeouts" -gt 0 ]; then
+    echo "disposition=expected_polling"
+    exit 0
+else
+    echo "disposition=no_timeouts"
+    exit 0
 fi
