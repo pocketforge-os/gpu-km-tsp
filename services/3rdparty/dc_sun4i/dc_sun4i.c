@@ -68,6 +68,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <drm/drm_device.h>
+#include <drm/drm_drv.h>
 #include <drm/drm_fb_helper.h>
 
 #include "kerneldisplay.h"
@@ -95,6 +96,7 @@ typedef struct
 {
 	IMG_HANDLE			hSrvHandle;
 	IMG_UINT32			ePixFormat;
+	struct drm_device	*psDRMDev;
 	struct fb_info		*psLINFBInfo;
 	bool				bCanFlip;
 }
@@ -132,22 +134,41 @@ static DC_SUN4I_DEVICE *gpsDeviceData;
  * - allwinner,sun8i-a33-display-engine (A33)
  * - allwinner,sun50i-a100-display-engine (A100/A133)
  *
- * Returns fb_info pointer on success, NULL on failure.
+ * Outputs:
+ *   @out_drm: drm_device pointer with incremented refcount (caller must drm_dev_put)
+ *   @out_info: fb_info pointer (valid while DRM dev ref held + fb_helper alive)
  *
- * Lifetime note: The returned fb_info pointer is valid as long as:
- * 1. The fbdev owner module is held (try_module_get on fbops->owner)
- * 2. The DRM driver remains bound (device-specific module assumption)
+ * Returns 0 on success, negative errno on failure.
  *
- * This is safe for device-specific display controller modules that are
- * tightly coupled to the DRM driver for the same hardware.
+ * Lifetime contract (public API):
+ *   1. drm_dev_get() on drm_device pins the drm_device struct itself.
+ *   2. drm_dev_enter()/exit() synchronizes against drm_dev_unplug() at each access.
+ *   3. try_module_get(fbops->owner) pins the fbdev owner module (prevents module unload).
+ *   4. The fb_helper pointer inside drm_device is set/cleared by the DRM driver;
+ *      drm_dev_enter() returns false if the device has been unplugged, which
+ *      prevents access after unplug.
+ *
+ * Known limitation:
+ *   The public Linux 7.2 fbdev API does not provide a way to take a reference
+ *   on the fb_info itself or on drm_fb_helper. If the DRM driver calls
+ *   drm_fb_helper_fini() without calling drm_dev_unplug() first, the fb_info
+ *   could become invalid while the drm_device struct is still alive. For this
+ *   device-specific module tightly coupled to sun4i-drm on the same hardware,
+ *   the unplug path (which the DRM core drives on unbind) provides the
+ *   required synchronization. We check drm_dev_enter() at every runtime
+ *   access and refuse operation if it returns false.
  */
-static struct fb_info *dc_sun4i_find_fb_info(void)
+static int dc_sun4i_find_fb_info(struct drm_device **out_drm,
+				 struct fb_info **out_info)
 {
 	struct device_node *np = NULL;
 	struct platform_device *pdev;
 	struct device *dev;
 	struct drm_device *drm;
 	struct fb_info *info = NULL;
+
+	*out_drm = NULL;
+	*out_info = NULL;
 
 	/* Find the sun4i-drm device by compatible string (A10, A33, or A100) */
 	np = of_find_compatible_node(NULL, NULL, "allwinner,sun4i-a10-display-engine");
@@ -160,7 +181,7 @@ static struct fb_info *dc_sun4i_find_fb_info(void)
 	}
 	if (!np) {
 		pr_err("dc_sun4i: no compatible sun4i-drm device found (tried A10/A33/A100)\n");
-		return NULL;
+		return -ENODEV;
 	}
 
 	/* Get the platform device from the device node */
@@ -168,7 +189,7 @@ static struct fb_info *dc_sun4i_find_fb_info(void)
 	of_node_put(np);
 	if (!pdev) {
 		pr_err("dc_sun4i: no platform device for sun4i-drm\n");
-		return NULL;
+		return -ENODEV;
 	}
 
 	/* Get the drm_device from platform device drvdata */
@@ -177,27 +198,34 @@ static struct fb_info *dc_sun4i_find_fb_info(void)
 	if (!drm) {
 		pr_err("dc_sun4i: no drm_device in drvdata - sun4i-drm not fully initialized\n");
 		put_device(&pdev->dev);
-		return NULL;
+		return -ENODEV;
 	}
+
+	/* Hold a reference on the drm_device to pin its lifetime */
+	drm_dev_get(drm);
 
 	/* Access fb_info through drm_fb_helper (public fields) */
 	if (!drm->fb_helper) {
 		pr_err("dc_sun4i: no fb_helper in drm_device - fbdev emulation not ready\n");
+		drm_dev_put(drm);
 		put_device(&pdev->dev);
-		return NULL;
+		return -ENODEV;
 	}
 
 	info = drm->fb_helper->info;
 	if (!info) {
 		pr_err("dc_sun4i: no fb_info in fb_helper - fbdev not initialized\n");
+		drm_dev_put(drm);
 		put_device(&pdev->dev);
-		return NULL;
+		return -ENODEV;
 	}
 
-	/* Release platform device reference - we have what we need */
+	/* Release platform device reference - drm_dev ref now pins drm_device */
 	put_device(&pdev->dev);
 
-	return info;
+	*out_drm = drm;
+	*out_info = info;
+	return 0;
 }
 
 
@@ -231,8 +259,15 @@ PVRSRV_ERROR DC_SUN4I_PanelQuery(IMG_HANDLE hDeviceData,
 								 PVRSRV_PANEL_INFO *psPanelInfo)
 {
 	DC_SUN4I_DEVICE *psDeviceData = hDeviceData;
-	struct fb_var_screeninfo *psVar = &psDeviceData->psLINFBInfo->var;
+	struct fb_var_screeninfo *psVar;
 	struct fb_var_screeninfo sVar = { .pixclock = 0 };
+	int drm_idx;
+
+	/* Protect against DRM device unplug */
+	if (!drm_dev_enter(psDeviceData->psDRMDev, &drm_idx))
+		return PVRSRV_ERROR_DC_DEVICE_INACCESSIBLE;
+
+	psVar = &psDeviceData->psLINFBInfo->var;
 
 	/* Linux 7.2: lock_fb_info is void, always succeeds */
 	lock_fb_info(psDeviceData->psLINFBInfo);
@@ -278,6 +313,7 @@ PVRSRV_ERROR DC_SUN4I_PanelQuery(IMG_HANDLE hDeviceData,
 		((int)sVar.height > 0) ? 254000 / sVar.height * psVar->yres / 10000 : FALLBACK_DPI;
 
 	unlock_fb_info(psDeviceData->psLINFBInfo);
+	drm_dev_exit(drm_idx);
 	return PVRSRV_OK;
 }
 
@@ -308,8 +344,15 @@ PVRSRV_ERROR DC_SUN4I_DimQuery(IMG_HANDLE hDeviceData,
 							   IMG_UINT32 *pui32Supported)
 {
 	DC_SUN4I_DEVICE *psDeviceData = hDeviceData;
-	struct fb_var_screeninfo *psVar = &psDeviceData->psLINFBInfo->var;
+	struct fb_var_screeninfo *psVar;
 	int i;
+	int drm_idx;
+
+	/* Protect against DRM device unplug */
+	if (!drm_dev_enter(psDeviceData->psDRMDev, &drm_idx))
+		return PVRSRV_ERROR_DC_DEVICE_INACCESSIBLE;
+
+	psVar = &psDeviceData->psLINFBInfo->var;
 
 	/* Linux 7.2: lock_fb_info is void, always succeeds */
 	lock_fb_info(psDeviceData->psLINFBInfo);
@@ -324,6 +367,7 @@ PVRSRV_ERROR DC_SUN4I_DimQuery(IMG_HANDLE hDeviceData,
 	}
 
 	unlock_fb_info(psDeviceData->psLINFBInfo);
+	drm_dev_exit(drm_idx);
 	return PVRSRV_OK;
 }
 
@@ -356,9 +400,10 @@ DC_SUN4I_ContextConfigureCheck(IMG_HANDLE hDisplayContext,
 {
 	DC_SUN4I_CONTEXT *psDeviceContext = hDisplayContext;
 	DC_SUN4I_DEVICE *psDeviceData = psDeviceContext->psDeviceData;
-	struct fb_var_screeninfo *psVar = &psDeviceData->psLINFBInfo->var;
+	struct fb_var_screeninfo *psVar;
 	DC_SUN4I_BUFFER *psBuffer;
 	PVRSRV_ERROR eError;
+	int drm_idx;
 
 	if(ui32PipeCount != 1)
 	{
@@ -371,6 +416,14 @@ DC_SUN4I_ContextConfigureCheck(IMG_HANDLE hDisplayContext,
 		eError = PVRSRV_ERROR_DC_INVALID_CONFIG;
 		goto err_out;
 	}
+
+	/* Protect against DRM device unplug */
+	if (!drm_dev_enter(psDeviceData->psDRMDev, &drm_idx)) {
+		eError = PVRSRV_ERROR_DC_DEVICE_INACCESSIBLE;
+		goto err_out;
+	}
+
+	psVar = &psDeviceData->psLINFBInfo->var;
 
 	/* Linux 7.2: lock_fb_info is void, always succeeds */
 	lock_fb_info(psDeviceData->psLINFBInfo);
@@ -409,26 +462,38 @@ DC_SUN4I_ContextConfigureCheck(IMG_HANDLE hDisplayContext,
 	eError = PVRSRV_OK;
 err_unlock:
 	unlock_fb_info(psDeviceData->psLINFBInfo);
+	drm_dev_exit(drm_idx);
 err_out:
 	return eError;
 }
 
 static
 void DC_SUN4I_ContextConfigure(IMG_HANDLE hDisplayContext,
-								   IMG_UINT32 ui32PipeCount,
-								   PVRSRV_SURFACE_CONFIG_INFO *pasSurfAttrib,
-								   IMG_HANDLE *ahBuffers,
-								   IMG_UINT32 ui32DisplayPeriod,
-								   IMG_HANDLE hConfigData)
+							   IMG_UINT32 ui32PipeCount,
+							   PVRSRV_SURFACE_CONFIG_INFO *pasSurfAttrib,
+							   IMG_HANDLE *ahBuffers,
+							   IMG_UINT32 ui32DisplayPeriod,
+							   IMG_HANDLE hConfigData)
 {
 	DC_SUN4I_CONTEXT *psDeviceContext = hDisplayContext;
 	DC_SUN4I_DEVICE *psDeviceData = psDeviceContext->psDeviceData;
-	struct fb_var_screeninfo sVar = psDeviceData->psLINFBInfo->var;
+	struct fb_var_screeninfo sVar;
 	int err;
+	bool drm_entered;
+	int drm_idx;
 
 	PVR_UNREFERENCED_PARAMETER(ui32PipeCount);
 	PVR_UNREFERENCED_PARAMETER(pasSurfAttrib);
 	PVR_UNREFERENCED_PARAMETER(ui32DisplayPeriod);
+
+	/* Protect against DRM device unplug */
+	drm_entered = drm_dev_enter(psDeviceData->psDRMDev, &drm_idx);
+	if (!drm_entered) {
+		pr_err("dc_sun4i: DRM device unplugged during ContextConfigure\n");
+		goto out_retire;
+	}
+
+	sVar = psDeviceData->psLINFBInfo->var;
 
 	sVar.yoffset = 0;
 
@@ -476,7 +541,9 @@ void DC_SUN4I_ContextConfigure(IMG_HANDLE hDisplayContext,
 
 	console_unlock();
 	unlock_fb_info(psDeviceData->psLINFBInfo);
+	drm_dev_exit(drm_idx);
 
+out_retire:
 	if (psDeviceContext->hLastConfigData)
 	{
 		DCDisplayConfigurationRetired(psDeviceContext->hLastConfigData);
@@ -493,8 +560,8 @@ void DC_SUN4I_ContextConfigure(IMG_HANDLE hDisplayContext,
 		 */
 		psDeviceContext->hLastConfigData = NULL;
 
-		/* We still need to "retire" this NULL flip as that signals back to
-		 * the DC core that we've finished doing what we need to do and it
+		/* We still need to "retire" this NULL flip as that signals back to the
+		 * DC core that we've finished doing what we need to do and it
 		 * can destroy the display context
 		 */
 		DCDisplayConfigurationRetired(hConfigData);
@@ -615,6 +682,12 @@ PVRSRV_ERROR DC_SUN4I_BufferAcquire(IMG_HANDLE hBuffer,
 	IMG_UINT32 ui32ByteSize = psBuffer->ui32ByteStride * psBuffer->ui32Height;
 	uintptr_t uiStartAddr;
 	IMG_UINT32 i, ui32MaxLen;
+	PVRSRV_ERROR eError;
+	int drm_idx;
+
+	/* Protect against DRM device unplug */
+	if (!drm_dev_enter(psDeviceData->psDRMDev, &drm_idx))
+		return PVRSRV_ERROR_DC_DEVICE_INACCESSIBLE;
 
 	/* Linux 7.2's drm_fbdev_dma uses direct DMA mapping, not vmalloc.
 	 * fix.smem_start is the DMA/bus address of the framebuffer.
@@ -626,7 +699,8 @@ PVRSRV_ERROR DC_SUN4I_BufferAcquire(IMG_HANDLE hBuffer,
 	if (uiStartAddr == 0)
 	{
 		pr_err("dc_sun4i: fix.smem_start is 0; unsupported framebuffer mapping\n");
-		return PVRSRV_ERROR_NOT_SUPPORTED;
+		eError = PVRSRV_ERROR_NOT_SUPPORTED;
+		goto out;
 	}
 
 	uiStartAddr += psBuffer->ui32BufferID * ui32ByteSize;
@@ -643,8 +717,11 @@ PVRSRV_ERROR DC_SUN4I_BufferAcquire(IMG_HANDLE hBuffer,
 	 * its own CPU virtual address mapping for the buffer.
 	 */
 	*ppvLinAddr = NULL;
+	eError = PVRSRV_OK;
 
-	return PVRSRV_OK;
+out:
+	drm_dev_exit(drm_idx);
+	return eError;
 }
 
 static void DC_SUN4I_BufferRelease(IMG_HANDLE hBuffer)
@@ -757,18 +834,23 @@ static int __init DC_SUN4I_init(void)
 		.pfnBufferFree				= DC_SUN4I_BufferFree,
 	};
 
+	struct drm_device *psDRMDev = NULL;
 	struct fb_info *psLINFBInfo;
 	IMG_PIXFMT ePixFormat;
 	int err = -ENODEV;
 
-	/* Linux 7.2: Discover fb_info via DRM device path */
-	psLINFBInfo = dc_sun4i_find_fb_info();
-	if(!psLINFBInfo)
+	/* Linux 7.2: Discover fb_info via DRM device path.
+	 * On success, psDRMDev has an incremented refcount (drm_dev_get),
+	 * which we must release on every exit path.
+	 */
+	err = dc_sun4i_find_fb_info(&psDRMDev, &psLINFBInfo);
+	if(err)
 	{
 		pr_err("No Linux framebuffer (fbdev) device found via DRM!\n"
 			   "Check that sun4i-drm is loaded and fbdev emulation is enabled.\n");
 		goto err_out;
 	}
+	err = -ENODEV; /* Reset for error paths below */
 
 	/* Linux 7.2: lock_fb_info is void, always succeeds */
 	lock_fb_info(psLINFBInfo);
@@ -780,7 +862,7 @@ static int __init DC_SUN4I_init(void)
 	{
 		pr_err("The fbdev device detected had a zero smem_len or "
 			   "line_length,\nwhich suggests it is a broken driver.\n");
-		goto err_unlock;
+		goto err_drm_put;
 	}
 
 	if(psLINFBInfo->fix.type != FB_TYPE_PACKED_PIXELS ||
@@ -788,7 +870,7 @@ static int __init DC_SUN4I_init(void)
 	{
 		pr_err("The fbdev device detected is not truecolor with packed "
 			   "pixels.\n");
-		goto err_unlock;
+		goto err_drm_put;
 	}
 
 	if(psLINFBInfo->var.bits_per_pixel == 32)
@@ -801,14 +883,14 @@ static int __init DC_SUN4I_init(void)
 		   psLINFBInfo->var.blue.offset  != 0)
 		{
 			pr_err("The fbdev device detected uses an unrecognized "
-				   "32bit pixel format (%u/%u/%u, %u/%u/%u)\n",
-				   psLINFBInfo->var.red.length,
-				   psLINFBInfo->var.green.length,
-				   psLINFBInfo->var.blue.length,
-				   psLINFBInfo->var.red.offset,
-				   psLINFBInfo->var.green.offset,
-				   psLINFBInfo->var.blue.offset);
-			goto err_unlock;
+			   "32bit pixel format (%u/%u/%u, %u/%u/%u)\n",
+			   psLINFBInfo->var.red.length,
+			   psLINFBInfo->var.green.length,
+			   psLINFBInfo->var.blue.length,
+			   psLINFBInfo->var.red.offset,
+			   psLINFBInfo->var.green.offset,
+			   psLINFBInfo->var.blue.offset);
+			goto err_drm_put;
 		}
 #if defined(DC_SUN4I_FORCE_XRGB8888)
 		ePixFormat = IMG_PIXFMT_B8G8R8X8_UNORM;
@@ -826,14 +908,14 @@ static int __init DC_SUN4I_init(void)
 		   psLINFBInfo->var.blue.offset  != 0)
 		{
 			pr_err("The fbdev device detected uses an unrecognized "
-				   "16bit pixel format (%u/%u/%u, %u/%u/%u)\n",
-				   psLINFBInfo->var.red.length,
-				   psLINFBInfo->var.green.length,
-				   psLINFBInfo->var.blue.length,
-				   psLINFBInfo->var.red.offset,
-				   psLINFBInfo->var.green.offset,
-				   psLINFBInfo->var.blue.offset);
-			goto err_unlock;
+			   "16bit pixel format (%u/%u/%u, %u/%u/%u)\n",
+			   psLINFBInfo->var.red.length,
+			   psLINFBInfo->var.green.length,
+			   psLINFBInfo->var.blue.length,
+			   psLINFBInfo->var.red.offset,
+			   psLINFBInfo->var.green.offset,
+			   psLINFBInfo->var.blue.offset);
+			goto err_drm_put;
 		}
 		ePixFormat = IMG_PIXFMT_B5G6R5_UNORM;
 	}
@@ -841,13 +923,13 @@ static int __init DC_SUN4I_init(void)
 	{
 		pr_err("The fbdev device detected uses an unsupported "
 			   "bpp (%u).\n", psLINFBInfo->var.bits_per_pixel);
-		goto err_unlock;
+		goto err_drm_put;
 	}
 
 	if(!try_module_get(psLINFBInfo->fbops->owner))
 	{
 		pr_err("try_module_get() failed");
-		goto err_unlock;
+		goto err_drm_put;
 	}
 
 	if(psLINFBInfo->fbops->fb_open &&
@@ -887,22 +969,32 @@ static int __init DC_SUN4I_init(void)
 			psLINFBInfo->var.xres_virtual, psLINFBInfo->var.yres_virtual,
 			ePixFormat, gpsDeviceData->bCanFlip);
 	err = 0;
+
+	/* Store DRM device in gpsDeviceData so exit() can release the ref.
+	 * On success, the ref ownership transfers to gpsDeviceData; we do NOT
+	 * release it here. Error paths release via err_drm_put.
+	 */
+	gpsDeviceData->psDRMDev = psDRMDev;
+	goto err_unlock; /* Success - skip all cleanup except lock release */
+
+err_kfree:
+	kfree(gpsDeviceData);
+err_module_put:
+	module_put(psLINFBInfo->fbops->owner);
+err_drm_put:
+	drm_dev_put(psDRMDev);
 err_unlock:
 	console_unlock();
 	unlock_fb_info(psLINFBInfo);
 err_out:
 	return err;
-err_kfree:
-	kfree(gpsDeviceData);
-err_module_put:
-	module_put(psLINFBInfo->fbops->owner);
-	goto err_unlock;
 }
 
 static void __exit DC_SUN4I_exit(void)
 {
 	DC_SUN4I_DEVICE *psDeviceData = gpsDeviceData;
 	struct fb_info *psLINFBInfo = psDeviceData->psLINFBInfo;
+	struct drm_device *psDRMDev = psDeviceData->psDRMDev;
 
 	/* Linux 7.2: lock_fb_info is void, always succeeds */
 	lock_fb_info(psLINFBInfo);
@@ -918,6 +1010,9 @@ static void __exit DC_SUN4I_exit(void)
 
 	DCUnregisterDevice(psDeviceData->hSrvHandle);
 	kfree(psDeviceData);
+
+	/* Release the drm_device reference acquired in init */
+	drm_dev_put(psDRMDev);
 }
 
 module_init(DC_SUN4I_init);

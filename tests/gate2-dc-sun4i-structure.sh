@@ -57,6 +57,44 @@ grep -q "allwinner,sun50i-a100-display-engine" "$DC_FILE" || fail missing_a100_c
 # Check reference balancing (put_device after of_find_device_by_node)
 grep -q "put_device" "$DC_FILE" || fail missing_put_device_reference_balance
 
+# Check DRM lifetime management (Linux 7.2 review requirements)
+# drm_dev_get/put for drm_device reference pinning
+grep -q "drm_dev_get" "$DC_FILE" || fail missing_drm_dev_get
+grep -q "drm_dev_put" "$DC_FILE" || fail missing_drm_dev_put
+# drm_dev_enter/exit for unplug synchronization
+grep -q "drm_dev_enter" "$DC_FILE" || fail missing_drm_dev_enter
+grep -q "drm_dev_exit" "$DC_FILE" || fail missing_drm_dev_exit
+# psDRMDev stored in device context
+grep -q "psDRMDev" "$DC_FILE" || fail missing_psDRMDev_field
+# drm/drm_drv.h include for DRM API declarations
+grep -q "include <drm/drm_drv.h>" "$DC_FILE" || fail missing_drm_drv_h_include
+# PVRSRV_ERROR_DC_DEVICE_INACCESSIBLE for unplugged provider
+grep -q "PVRSRV_ERROR_DC_DEVICE_INACCESSIBLE" "$DC_FILE" || fail missing_dc_device_inaccessible_error
+
+# Verify drm_dev_enter is used in runtime fb_info accessors
+# These functions access psLINFBInfo and must be protected against unplug
+# For each accessor, find its line number and check ~80 lines after for drm_dev_enter
+for func in DC_SUN4I_PanelQuery DC_SUN4I_DimQuery DC_SUN4I_ContextConfigureCheck DC_SUN4I_ContextConfigure DC_SUN4I_BufferAcquire; do
+	line=$(grep -n "${func}(IMG_HANDLE" "$DC_FILE" | grep -v "\.pfn\|sDCFunctions" | head -1 | cut -d: -f1)
+	if [ -z "$line" ]; then
+		fail func_not_found "$func"
+	fi
+	end=$((line + 80))
+	if ! sed -n "${line},${end}p" "$DC_FILE" | grep -q "drm_dev_enter"; then
+		fail missing_drm_dev_enter_in "$func"
+	fi
+done
+
+# Verify error unwind labels exist in init for drm_dev_put
+if ! grep -q "err_drm_put:" "$DC_FILE"; then
+	fail missing_err_drm_put_label
+fi
+
+# Verify DC_SUN4I_exit calls drm_dev_put
+if ! awk '/^static void __exit DC_SUN4I_exit/,/^\}/' "$DC_FILE" | grep -q "drm_dev_put"; then
+	fail missing_drm_dev_put_in_exit
+fi
+
 # Check CONFIG_DRM_FBDEV_EMULATION guard
 grep -q "#if !defined(CONFIG_DRM_FBDEV_EMULATION)" "$DC_FILE" || fail missing_CONFIG_DRM_FBDEV_EMULATION_guard
 
