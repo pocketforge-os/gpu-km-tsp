@@ -622,4 +622,20 @@ static inline void pvr_unregister_shrinker(struct shrinker *s)
 #define unregister_shrinker(s)    pvr_unregister_shrinker(s)
 #endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)) */
 
+/*
+ * Linux 6.17 removed pfn_t and <linux/pfn_t.h>; the insert/remap helpers take
+ * a plain unsigned long PFN. Every pfn_t this driver builds carries no PFN_*
+ * flags, so a flag-less unsigned long PFN is an exact replacement.
+ */
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0))
+#include <linux/mm.h>
+#include <linux/pfn.h>
+typedef unsigned long pfn_t;
+#define phys_to_pfn_t(addr, flags) ((void)(flags), (pfn_t)PHYS_PFN(addr))
+#define page_to_pfn_t(page)        ((pfn_t)page_to_pfn(page))
+#define pfn_t_to_pfn(pfn)          ((unsigned long)(pfn))
+#define pfn_t_to_page(pfn)         pfn_to_page(pfn)
+#define pfn_t_valid(pfn)           pfn_valid(pfn)
+#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)) */
+
 #endif /* __KERNEL_COMPATIBILITY_H__ */

@@ -23,6 +23,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 KERNELDIR="${1:-$(cd "$SCRIPT_DIR/../kernel-tsp" && pwd)}"
+# KERNELDIR is consumed here; any remaining arguments are passed through to make.
+[ "$#" -gt 0 ] && shift
 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-none-linux-gnu-}"
 
 # Auto-detect pvr-buildopts.mk if not explicitly set
@@ -42,12 +44,22 @@ if [ ! -f "$KERNELDIR/include/generated/autoconf.h" ]; then
     exit 1
 fi
 
+# dc_sunxi is an fbdev shim (registered_fb[], CONFIG_FB). A kernel without
+# CONFIG_FB (the mainline 6.x/7.x lines) cannot build it, so default to the
+# headless build with the dc_null Display Class backend, as the mainline
+# tsp-mc9m.9 build did. Explicit PVR_HEADLESS_NO_DC / PVR_DC_NULL win.
+if ! grep -q '^#define CONFIG_FB 1$' "$KERNELDIR/include/generated/autoconf.h"; then
+    PVR_HEADLESS_NO_DC="${PVR_HEADLESS_NO_DC:-1}"
+    PVR_DC_NULL="${PVR_DC_NULL:-1}"
+fi
+
 echo "=== Building pvrsrvkm.ko for sunxi_a133 ==="
 echo "  DDK source:    $SCRIPT_DIR"
 echo "  Kernel:        $KERNELDIR"
 echo "  Cross:         $CROSS_COMPILE"
 echo "  Odyssey capture: ${ODYSSEY_CAPTURE:-0}"
 echo "  Extra CFLAGS:  ${EXTRA_PVR_KM_CFLAGS:-}"
+echo "  Headless/DC:   PVR_HEADLESS_NO_DC=${PVR_HEADLESS_NO_DC:-0} PVR_DC_NULL=${PVR_DC_NULL:-0}"
 echo "  Build-opts mk: ${PVR_BUILDOPTS_MK:-<auto-detect via Makefile>}"
 echo ""
 
@@ -60,6 +72,8 @@ make -C "$KERNELDIR" \
     EXTRA_PVR_KM_CFLAGS="${EXTRA_PVR_KM_CFLAGS:-}" \
     CONFIG_DRM_IMG_ROGUE=m \
     PVR_SYSTEM=sunxi_a133 \
+    ${PVR_HEADLESS_NO_DC:+PVR_HEADLESS_NO_DC="$PVR_HEADLESS_NO_DC"} \
+    ${PVR_DC_NULL:+PVR_DC_NULL="$PVR_DC_NULL"} \
     ${PVR_BUILDOPTS_MK:+PVR_BUILDOPTS_MK="$PVR_BUILDOPTS_MK"} \
     modules \
     "$@"
