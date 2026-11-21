@@ -44,8 +44,227 @@ grep -q "DCRegisterDevice(&sDCFunctions" "$DC_FILE" || fail missing_DCRegisterDe
 # Check DCDisplayConfigurationRetired call (flip completion)
 grep -q "DCDisplayConfigurationRetired" "$DC_FILE" || fail missing_DCDisplayConfigurationRetired
 
-# Check fbdev binding
-grep -q "registered_fb\[0\]" "$DC_FILE" || fail missing_registered_fb_binding
+# Check DRM-based fb_info discovery (Linux 7.2+ requirement)
+grep -q "dc_sun4i_find_fb_info" "$DC_FILE" || fail missing_fb_info_discovery
+grep -q "of_find_compatible_node" "$DC_FILE" || fail missing_of_find_compatible_node
+grep -q "drm->fb_helper->info" "$DC_FILE" || fail missing_drm_fb_helper_access
+
+# Check supported compatible strings (A10, A33, A100/A133)
+grep -q "allwinner,sun4i-a10-display-engine" "$DC_FILE" || fail missing_a10_compatible
+grep -q "allwinner,sun8i-a33-display-engine" "$DC_FILE" || fail missing_a33_compatible
+grep -q "allwinner,sun50i-a100-display-engine" "$DC_FILE" || fail missing_a100_compatible
+
+# Check reference balancing (put_device after of_find_device_by_node)
+grep -q "put_device" "$DC_FILE" || fail missing_put_device_reference_balance
+
+# Check DRM lifetime management (Linux 7.2 review requirements)
+# drm_dev_get/put for drm_device reference pinning
+grep -q "drm_dev_get" "$DC_FILE" || fail missing_drm_dev_get
+grep -q "drm_dev_put" "$DC_FILE" || fail missing_drm_dev_put
+# drm_dev_enter/exit for unplug synchronization
+grep -q "drm_dev_enter" "$DC_FILE" || fail missing_drm_dev_enter
+grep -q "drm_dev_exit" "$DC_FILE" || fail missing_drm_dev_exit
+# psDRMDev stored in device context
+grep -q "psDRMDev" "$DC_FILE" || fail missing_psDRMDev_field
+# drm/drm_drv.h include for DRM API declarations
+grep -q "include <drm/drm_drv.h>" "$DC_FILE" || fail missing_drm_drv_h_include
+# PVRSRV_ERROR_DC_DEVICE_INACCESSIBLE for unplugged provider
+grep -q "PVRSRV_ERROR_DC_DEVICE_INACCESSIBLE" "$DC_FILE" || fail missing_dc_device_inaccessible_error
+
+# Verify drm_dev_enter is used in runtime fb_info accessors
+# These functions access psLINFBInfo and must be protected against unplug
+# For each accessor, find its line number and check ~80 lines after for drm_dev_enter
+for func in DC_SUN4I_PanelQuery DC_SUN4I_DimQuery DC_SUN4I_ContextConfigureCheck DC_SUN4I_ContextConfigure DC_SUN4I_BufferAcquire; do
+	line=$(grep -n "${func}(IMG_HANDLE" "$DC_FILE" | grep -v "\.pfn\|sDCFunctions" | head -1 | cut -d: -f1)
+	if [ -z "$line" ]; then
+		fail func_not_found "$func"
+	fi
+	end=$((line + 80))
+	if ! sed -n "${line},${end}p" "$DC_FILE" | grep -q "drm_dev_enter"; then
+		fail missing_drm_dev_enter_in "$func"
+	fi
+done
+
+# --- LIFECYCLE AND ERROR-PATH TESTS ---
+
+# Verify the exactly-once fb_release helper exists
+if ! grep -q "dc_sun4i_fb_release_once" "$DC_FILE"; then
+	fail missing_fb_release_once_helper
+fi
+
+# Verify error unwind labels exist in init (new structure)
+if ! grep -q "err_release_helper:" "$DC_FILE"; then
+	fail missing_err_release_helper_label
+fi
+if ! grep -q "err_release_data:" "$DC_FILE"; then
+	fail missing_err_release_data_label
+fi
+if ! grep -q "err_module_put:" "$DC_FILE"; then
+	fail missing_err_module_put_label "must have separate label for after try_module_get but before kzalloc"
+fi
+if ! grep -q "err_unlock:" "$DC_FILE"; then
+	fail missing_err_unlock_label
+fi
+
+# Verify teardown ordering: err_release_helper BEFORE err_release_data BEFORE err_module_put BEFORE err_unlock
+init_block=$(sed -n '/^static int __init DC_SUN4I_init/,/^}/p' "$DC_FILE")
+helper_line=$(echo "$init_block" | grep -n "^err_release_helper:" | head -1 | cut -d: -f1)
+data_line=$(echo "$init_block" | grep -n "^err_release_data:" | head -1 | cut -d: -f1)
+module_put_line=$(echo "$init_block" | grep -n "^err_module_put:" | head -1 | cut -d: -f1)
+unlock_line=$(echo "$init_block" | grep -n "^err_unlock:" | head -1 | cut -d: -f1)
+if [ -n "$helper_line" ] && [ -n "$data_line" ] && [ -n "$module_put_line" ] && [ -n "$unlock_line" ]; then
+	if [ "$helper_line" -ge "$data_line" ] || [ "$data_line" -ge "$module_put_line" ] || [ "$module_put_line" -ge "$unlock_line" ]; then
+		fail teardown_order_wrong "helper=$helper_line data=$data_line module_put=$module_put_line unlock=$unlock_line (expected helper<data<module_put<unlock)"
+	fi
+else
+	fail teardown_labels_missing "helper=$helper_line data=$data_line module_put=$module_put_line unlock=$unlock_line"
+fi
+
+# Verify validation errors in init go to err_unlock (before kzalloc, no fb_release needed)
+if ! grep -q "goto err_unlock" "$DC_FILE"; then
+	fail validation_errors_wrong_target "no goto err_unlock found; validation errors must release locks"
+fi
+
+# Verify psOwner field exists in device struct (cached module reference)
+if ! grep -q "struct module.*psOwner" "$DC_FILE"; then
+	fail missing_psOwner_field "device struct must cache fbops->owner independently"
+fi
+
+# Verify psOwner is set before DCRegisterDevice publication
+reg_line=$(grep -n "if(DCRegisterDevice" "$DC_FILE" | head -1 | cut -d: -f1)
+owner_assign_line=$(grep -n "gpsDeviceData->psOwner = " "$DC_FILE" | head -1 | cut -d: -f1)
+if [ -n "$reg_line" ] && [ -n "$owner_assign_line" ]; then
+	if [ "$owner_assign_line" -ge "$reg_line" ]; then
+		fail owner_set_after_publication "psOwner=$owner_assign_line DCRegisterDevice=$reg_line (must set before)"
+	fi
+else
+	fail owner_cache_missing "psOwner assignment or DCRegisterDevice not found"
+fi
+
+# Verify DC_SUN4I_exit uses cached psOwner (not stale fb_info->fbops->owner)
+exit_block=$(awk '/^static void __exit DC_SUN4I_exit/,/^\}/' "$DC_FILE")
+if ! echo "$exit_block" | grep -q "psOwner"; then
+	fail exit_uses_stale_fb_info "DC_SUN4I_exit must use cached psOwner, not fb_info->fbops->owner"
+fi
+# Exit must NOT dereference fbops->owner directly
+if echo "$exit_block" | grep -q "fbops->owner"; then
+	fail exit_dereferences_stale_fbops "DC_SUN4I_exit must not dereference fbops->owner"
+fi
+
+# Verify DC_SUN4I_exit calls drm_dev_put
+if ! echo "$exit_block" | grep -q "drm_dev_put"; then
+	fail missing_drm_dev_put_in_exit
+fi
+
+# Verify DC_SUN4I_exit calls module_put (balanced with try_module_get)
+if ! echo "$exit_block" | grep -q "module_put"; then
+	fail missing_module_put_in_exit
+fi
+
+# Verify DC_SUN4I_exit calls DCUnregisterDevice before teardown
+unreg_line=$(echo "$exit_block" | grep -n "DCUnregisterDevice" | head -1 | cut -d: -f1)
+put_line=$(echo "$exit_block" | grep -n "drm_dev_put" | head -1 | cut -d: -f1)
+if [ -n "$unreg_line" ] && [ -n "$put_line" ]; then
+	if [ "$unreg_line" -ge "$put_line" ]; then
+		fail exit_unregister_order "DCUnregisterDevice=$unreg_line drm_dev_put=$put_line (unregister first)"
+	fi
+fi
+
+# Verify drm_dev_enter is used in dc_sun4i_find_fb_info (discovery protection)
+discovery_line=$(grep -n "^static int dc_sun4i_find_fb_info" "$DC_FILE" | head -1 | cut -d: -f1)
+if [ -n "$discovery_line" ]; then
+	discovery_end=$((discovery_line + 80))
+	if ! sed -n "${discovery_line},${discovery_end}p" "$DC_FILE" | grep -q "drm_dev_enter"; then
+		fail missing_drm_dev_enter_in_discovery "fb_helper dereference must be protected"
+	fi
+fi
+
+# --- SUCCESS-PATH CONTROL-FLOW TESTS ---
+# Critical: the success path must NOT fall through to error labels.
+# The drm_dev reference must be retained in gpsDeviceData until DC_SUN4I_exit.
+
+# Extract the init function
+init_block=$(awk '/^static int __init DC_SUN4I_init/,/^}/' "$DC_FILE")
+
+# Test 1: Verify success path ends with direct return 0, not goto
+success_return_line=$(echo "$init_block" | grep -n "return 0;" | head -1 | cut -d: -f1)
+if [ -z "$success_return_line" ]; then
+	fail missing_success_return_0 "init must have direct 'return 0;' for success path"
+fi
+
+# Test 2: Verify err_release_helper label exists and is AFTER the success return
+err_helper_label_line=$(echo "$init_block" | grep -n "^err_release_helper:" | head -1 | cut -d: -f1)
+if [ -z "$err_helper_label_line" ]; then
+	fail missing_err_release_helper_label "err_release_helper label must exist for error paths"
+fi
+if [ "$success_return_line" -ge "$err_helper_label_line" ]; then
+	fail success_path_reaches_helper "return 0 at line $success_return_line must come BEFORE err_release_helper at line $err_helper_label_line"
+fi
+
+# Test 3: Verify the success path does NOT contain goto to error labels
+success_path=$(echo "$init_block" | sed -n '/Found usable fbdev/,/return 0;/p')
+if echo "$success_path" | grep -q "goto err_"; then
+	fail success_path_has_goto_err "success path must not goto any error label (must retain drm_dev ref)"
+fi
+
+# Test 4: Verify success path contains console_unlock, unlock_fb_info, drm_dev_exit (but NOT drm_dev_put)
+if ! echo "$success_path" | grep -q "console_unlock()"; then
+	fail success_path_missing_console_unlock "success path must release console lock"
+fi
+if ! echo "$success_path" | grep -q "unlock_fb_info("; then
+	fail success_path_missing_unlock_fb_info "success path must release fb_info lock"
+fi
+if ! echo "$success_path" | grep -q "drm_dev_exit("; then
+	fail success_path_missing_drm_dev_exit "success path must leave drm_dev_enter section"
+fi
+if echo "$success_path" | grep -q "drm_dev_put("; then
+	fail success_path_has_drm_dev_put "success path MUST NOT call drm_dev_put (reference retained for exit)"
+fi
+
+# Test 5: Negative mutation - no code between return 0; and first error label
+between=$(echo "$init_block" | awk '/return 0;/{found=1; next} /^err_/{exit} found{print}')
+stripped=$(echo "$between" | sed '/\/\*/,/\*\//d' | sed '/^[[:space:]]*\/\//d' | sed '/^[[:space:]]*$/d' | sed '/^[[:space:]]*\*/d')
+if [ -n "$stripped" ]; then
+	fail success_path_has_fallthrough_code "unexpected code between 'return 0;' and error labels: $stripped"
+fi
+
+# Test 6: Verify error paths use correct goto targets
+if ! echo "$init_block" | grep -q "goto err_release_helper"; then
+	fail missing_goto_err_release_helper "notifier/DCRegisterDevice failure must goto err_release_helper"
+fi
+if ! echo "$init_block" | grep -q "goto err_release_data"; then
+	fail missing_goto_err_release_data "fb_open failure must goto err_release_data"
+fi
+if ! echo "$init_block" | grep -q "goto err_unlock"; then
+	fail missing_goto_err_unlock "validation errors must goto err_unlock"
+fi
+
+# Test 7: Verify err_release_helper calls dc_sun4i_fb_release_once
+helper_block=$(echo "$init_block" | sed -n '/^err_release_helper:/,/^err_release_data:/p')
+if ! echo "$helper_block" | grep -q "dc_sun4i_fb_release_once"; then
+	fail err_release_helper_missing_fb_release "err_release_helper must call dc_sun4i_fb_release_once"
+fi
+if ! echo "$helper_block" | grep -q "bus_unregister_notifier"; then
+	fail err_release_helper_missing_notifier_unregister "err_release_helper must unregister notifier"
+fi
+
+# Test 8: Verify err_release_data does NOT call dc_sun4i_fb_release_once (bFBOpened=false)
+data_block=$(echo "$init_block" | sed -n '/^err_release_data:/,/^err_unlock:/p')
+if echo "$data_block" | grep -q "dc_sun4i_fb_release_once"; then
+	fail err_release_data_should_not_call_fb_release "err_release_data must NOT call dc_sun4i_fb_release_once (bFBOpened=false)"
+fi
+
+# Test 9: Verify err_release_helper releases initial locks BEFORE calling shared helper
+helper_pre_release=$(echo "$helper_block" | awk '/^err_release_helper:/{found=1} found && /dc_sun4i_fb_release_once/{print; exit} found{print}')
+if ! echo "$helper_pre_release" | grep -q "console_unlock"; then
+	fail err_release_helper_lock_order "must release console_unlock BEFORE dc_sun4i_fb_release_once"
+fi
+if ! echo "$helper_pre_release" | grep -q "unlock_fb_info"; then
+	fail err_release_helper_lock_order "must release unlock_fb_info BEFORE dc_sun4i_fb_release_once"
+fi
+if ! echo "$helper_pre_release" | grep -q "drm_dev_exit"; then
+	fail err_release_helper_lock_order "must call drm_dev_exit BEFORE dc_sun4i_fb_release_once"
+fi
 
 # Check CONFIG_DRM_FBDEV_EMULATION guard
 grep -q "#if !defined(CONFIG_DRM_FBDEV_EMULATION)" "$DC_FILE" || fail missing_CONFIG_DRM_FBDEV_EMULATION_guard
@@ -66,8 +285,263 @@ BUILD_SCRIPT="$HERE/build-sunxi-a133.sh"
 grep -q "PVR_DC_SUN4I" "$BUILD_SCRIPT" || fail missing_PVR_DC_SUN4I_in_build_script
 grep -q "dc_sun4i.ko" "$BUILD_SCRIPT" || fail missing_dc_sun4i.ko_in_build_script
 
+# Test 8: fb_release notifier lifecycle - structural verification
+# Provider unbind notifier ensures fb_release runs before sun4i-drm teardown
+
+# 8a: Shared fb_release helper exists
+grep -q "static bool dc_sun4i_fb_release_once" "$DC_FILE" || fail missing_fb_release_once_function
+
+# 8b: Notifier callback function exists and calls the shared helper
+grep -q "dc_sun4i_unbind_notifier" "$DC_FILE" || fail missing_unbind_notifier_function
+notifier_block=$(sed -n '/^static int dc_sun4i_unbind_notifier/,/^}/p' "$DC_FILE")
+if ! echo "$notifier_block" | grep -q "dc_sun4i_fb_release_once"; then
+	fail notifier_not_using_shared_helper "notifier must call dc_sun4i_fb_release_once"
+fi
+
+# 8c: Notifier fields in DC_SUN4I_DEVICE struct
+grep -q "struct notifier_block.*sUnbindNotifier" "$DC_FILE" || fail missing_notifier_block_field
+grep -q "struct platform_device.*psPlatformDev" "$DC_FILE" || fail missing_platform_dev_field
+grep -q "struct mutex.*sFBLock" "$DC_FILE" || fail missing_fb_lock_field
+grep -q "enum eFBReleaseState.*eFBState" "$DC_FILE" || fail missing_fb_state_field
+grep -q "bool.*bNotifierRegistered" "$DC_FILE" || fail missing_notifier_registered_flag
+
+# 8d: Notifier registered in init BEFORE DCRegisterDevice
+grep -q "bus_register_notifier.*platform_bus_type" "$DC_FILE" || fail missing_bus_register_notifier
+init_block=$(sed -n '/^static int __init DC_SUN4I_init/,/^}/p' "$DC_FILE")
+notifier_reg_line=$(echo "$init_block" | grep -n "bus_register_notifier" | head -1 | cut -d: -f1)
+dc_register_line=$(echo "$init_block" | grep -n "if(DCRegisterDevice" | head -1 | cut -d: -f1)
+if [ -z "$notifier_reg_line" ] || [ -z "$dc_register_line" ]; then
+	fail notifier_or_dc_register_not_found "notifier_reg=$notifier_reg_line dc_register=$dc_register_line"
+fi
+if [ "$notifier_reg_line" -ge "$dc_register_line" ]; then
+	fail notifier_registered_after_publication "bus_register_notifier at line $notifier_reg_line must be BEFORE DCRegisterDevice at line $dc_register_line"
+fi
+
+# 8e: Notifier unregistered in exit (synchronizes with running callback)
+exit_block=$(sed -n '/^static void __exit DC_SUN4I_exit/,/^}/p' "$DC_FILE")
+if ! echo "$exit_block" | grep -q "bus_unregister_notifier.*platform_bus_type"; then
+	fail missing_bus_unregister_notifier_in_exit
+fi
+
+# 8f: Exit calls dc_sun4i_fb_release_once (exactly-once shared helper)
+if ! echo "$exit_block" | grep -q "dc_sun4i_fb_release_once"; then
+	fail exit_not_using_shared_helper "exit must call dc_sun4i_fb_release_once"
+fi
+
+# 8g: dc_sun4i_fb_release_once holds sFBLock during lock_fb_info/console_lock
+helper_block=$(sed -n '/^static bool dc_sun4i_fb_release_once/,/^}/p' "$DC_FILE")
+if ! echo "$helper_block" | grep -q "mutex_lock.*sFBLock"; then
+	fail helper_missing_mutex_lock "shared helper must take sFBLock"
+fi
+if ! echo "$helper_block" | grep -q "mutex_unlock.*sFBLock"; then
+	fail helper_missing_mutex_unlock "shared helper must release sFBLock"
+fi
+if ! echo "$helper_block" | grep -q "lock_fb_info"; then
+	fail helper_missing_lock_fb_info "shared helper must call lock_fb_info"
+fi
+if ! echo "$helper_block" | grep -q "console_lock"; then
+	fail helper_missing_console_lock "shared helper must call console_lock"
+fi
+if ! echo "$helper_block" | grep -q "console_unlock"; then
+	fail helper_missing_console_unlock "shared helper must call console_unlock"
+fi
+if ! echo "$helper_block" | grep -q "unlock_fb_info"; then
+	fail helper_missing_unlock_fb_info "shared helper must call unlock_fb_info"
+fi
+
+# 8h: Exactly-once claim under sFBLock (state machine)
+# Helper must check eFBState == FB_OPENED before claiming
+if ! echo "$helper_block" | grep -q "eFBState != FB_OPENED"; then
+	fail helper_missing_state_check "shared helper must check eFBState == FB_OPENED"
+fi
+# Helper must set state to FB_RELEASE_IN_PROGRESS (claim) then FB_RELEASED (success)
+if ! echo "$helper_block" | grep -q "eFBState = FB_RELEASE_IN_PROGRESS"; then
+	fail helper_missing_claim "shared helper must set eFBState = FB_RELEASE_IN_PROGRESS"
+fi
+if ! echo "$helper_block" | grep -q "eFBState = FB_RELEASED"; then
+	fail helper_missing_released "shared helper must set eFBState = FB_RELEASED after fb_release"
+fi
+
+# 8i: Mutex initialization
+grep -q "mutex_init.*sFBLock" "$DC_FILE" || fail missing_mutex_init
+
+# 8j: Platform device reference balance
+grep -q "get_device.*psPlatformDev" "$DC_FILE" || fail missing_get_device
+grep -q "put_device.*psPlatformDev" "$DC_FILE" || fail missing_put_device
+
+# 8k: Notifier callback matches exact platform device
+if ! echo "$notifier_block" | grep -q "dev != &psDeviceData->psPlatformDev->dev"; then
+	fail notifier_missing_device_match "notifier must match exact platform device"
+fi
+
+# 8l: Notifier handles BUS_NOTIFY_UNBIND_DRIVER action
+if ! echo "$notifier_block" | grep -q "BUS_NOTIFY_UNBIND_DRIVER"; then
+	fail notifier_missing_unbind_action "notifier must handle BUS_NOTIFY_UNBIND_DRIVER"
+fi
+
+# 8m: Notifier registration failure must fail init (goto err_release_direct)
+# Since notifier is not yet registered, we can do fb_release directly under held locks
+notifier_fail_block=$(echo "$init_block" | sed -n '/bus_register_notifier/,/^[[:space:]]*}$/p' | head -20)
+if echo "$notifier_fail_block" | grep -q "goto err_release_direct"; then
+	: # Good - notifier failure causes init to fail and do fb_release directly
+else
+	fail notifier_failure_not_fatal "bus_register_notifier failure must goto err_release_direct"
+fi
+
+# 8n: Negative mutation - exit must call dc_sun4i_fb_release_once BEFORE bus_unregister_notifier
+# This closes the race window: release while notifier coverage is still installed
+exit_release_line=$(echo "$exit_block" | grep -n "dc_sun4i_fb_release_once" | head -1 | cut -d: -f1)
+exit_unreg_line=$(echo "$exit_block" | grep -n "bus_unregister_notifier" | head -1 | cut -d: -f1)
+if [ -n "$exit_release_line" ] && [ -n "$exit_unreg_line" ]; then
+	if [ "$exit_release_line" -ge "$exit_unreg_line" ]; then
+		fail exit_release_after_unregister "dc_sun4i_fb_release_once=$exit_release_line must be BEFORE bus_unregister_notifier=$exit_unreg_line"
+	fi
+fi
+
+# 8o: Negative mutation - shared helper must NOT call bus_unregister_notifier
+if echo "$helper_block" | grep -q "bus_unregister_notifier"; then
+	fail helper_should_not_unregister "shared helper must NOT call bus_unregister_notifier (would deadlock)"
+fi
+
+# 8p: Negative mutation - err_unlock must NOT call module_put (pre-acquisition path)
+# err_unlock handles validation errors and failed try_module_get, before module ref is owned
+err_unlock_block=$(echo "$init_block" | sed -n '/^err_unlock:/,/^[^[:space:]]/p' | head -10)
+if echo "$err_unlock_block" | grep -q "module_put"; then
+	fail err_unlock_calls_module_put "err_unlock must NOT call module_put (pre-acquisition: no module ref owned)"
+fi
+
+# 8q: Negative mutation - err_module_put must call module_put (post-acquisition, pre-kzalloc)
+err_module_put_block=$(echo "$init_block" | sed -n '/^err_module_put:/,/^err_unlock:/p')
+if ! echo "$err_module_put_block" | grep -q "module_put"; then
+	fail err_module_put_missing_module_put "err_module_put must call module_put (owns module ref from try_module_get)"
+fi
+
+# 8r: Negative mutation - try_module_get failure must NOT go to a label that calls module_put
+# Find the try_module_get block and check its goto target
+try_get_block=$(echo "$init_block" | sed -n '/try_module_get/,/^[[:space:]]*}$/p' | head -5)
+try_get_goto=$(echo "$try_get_block" | grep "goto" | head -1 | sed 's/.*goto \([^;]*\).*/\1/')
+# The goto target must be err_unlock (which does NOT call module_put)
+if [ "$try_get_goto" != "err_unlock" ]; then
+	fail try_module_get_wrong_target "try_module_get failure must goto err_unlock (not $try_get_goto)"
+fi
+
+# 8s: State machine - helper must set FB_RELEASE_TERMINAL when drm_dev_enter fails
+if ! echo "$helper_block" | grep -q "eFBState = FB_RELEASE_TERMINAL"; then
+	fail helper_missing_terminal_state "shared helper must set FB_RELEASE_TERMINAL when drm_dev_enter fails"
+fi
+
+# 8t: State machine enum must exist with all states
+grep -q "enum eFBReleaseState" "$DC_FILE" || fail missing_fb_state_enum
+grep -q "FB_NONE" "$DC_FILE" || fail missing_fb_state_none
+grep -q "FB_OPENED" "$DC_FILE" || fail missing_fb_state_opened
+grep -q "FB_RELEASE_IN_PROGRESS" "$DC_FILE" || fail missing_fb_state_in_progress
+grep -q "FB_RELEASED" "$DC_FILE" || fail missing_fb_state_released
+grep -q "FB_RELEASE_TERMINAL" "$DC_FILE" || fail missing_fb_state_terminal
+
+# 8u: Safe unrelease - shared helper must return bool (indicates release completion)
+if ! echo "$helper_block" | grep -q "bool.*dc_sun4i_fb_release_once"; then
+	fail helper_must_return_bool "shared helper must return bool indicating release completion"
+fi
+
+# 8v: Safe unrelease - helper must return false when FB_RELEASE_TERMINAL
+if ! echo "$helper_block" | grep -q "return false"; then
+	fail helper_must_return_false "helper must return false when drm_dev_enter fails (FB_RELEASE_TERMINAL)"
+fi
+
+# 8w: Safe unrelease - DC_SUN4I_exit must check helper return value
+exit_block=$(sed -n '/^static void __exit DC_SUN4I_exit/,/^}/p' "$DC_FILE")
+if ! echo "$exit_block" | grep -q "bReleaseCompleted.*=.*dc_sun4i_fb_release_once"; then
+	fail exit_must_check_helper_return "DC_SUN4I_exit must capture helper return value"
+fi
+
+# 8x: Safe unrelease - exit must conditionally call module_put based on release state
+# module_put must only be called when bReleaseCompleted is true or state is not FB_RELEASE_TERMINAL
+if ! echo "$exit_block" | grep -q "if(bReleaseCompleted)"; then
+	fail exit_must_conditional_module_put "DC_SUN4I_exit must conditionally call module_put based on release state"
+fi
+
+# 8y: Negative mutation - exit must NOT unconditionally call module_put after terminal state
+# The unconditional module_put would unbalance fb_open/fb_release
+unconditional_check=$(echo "$exit_block" | grep -c "module_put(psOwner)" || true)
+# Should have at most 2 occurrences (in if/else branches), not 1 unconditional
+if [ "$unconditional_check" -eq 1 ]; then
+	fail exit_unconditional_module_put "DC_SUN4I_exit must NOT unconditionally call module_put (check release state)"
+fi
+
+# 8z: Safe unrelease - exit must have WARN/error for FB_RELEASE_TERMINAL path
+if ! echo "$exit_block" | grep -qE "pr_warn.*module.*ref.*leaked|pr_err.*module.*ref.*leaked"; then
+	fail exit_must_warn_terminal_leak "DC_SUN4I_exit must warn/document intentional module ref leak on FB_RELEASE_TERMINAL"
+fi
+
+# =====================================================================
+# GATE1 BUILD BOUND STRUCTURAL TESTS
+# =====================================================================
+GATE1_FILE="$HERE/tests/gate1-km-7x-build.sh"
+[ -f "$GATE1_FILE" ] || fail gate1_script_missing
+
+# 9a: Hard finite build bound - GATE1_HARD_MAX_JOBS must be defined (immutable)
+if ! grep -q "GATE1_HARD_MAX_JOBS=" "$GATE1_FILE"; then
+	fail gate1_missing_hard_max "gate1 must define GATE1_HARD_MAX_JOBS as immutable hard ceiling"
+fi
+
+# 9b: Hard finite build bound - resolve_jobs helper function must exist
+if ! grep -q "resolve_jobs()" "$GATE1_FILE"; then
+	fail gate1_missing_resolve_helper "gate1 must define resolve_jobs() side-effect-free helper"
+fi
+
+# 9c: Hard finite build bound - helper must validate against hard max (not caller-controlled ceiling)
+if ! grep -q "GATE1_HARD_MAX_JOBS" "$GATE1_FILE"; then
+	fail gate1_helper_not_capped "resolve_jobs must cap against GATE1_HARD_MAX_JOBS"
+fi
+
+# 9d: Negative mutation - gate1 must NOT allow caller to raise above hard max
+# Check that PF_GATE1_JOBS is capped, not used directly to raise ceiling
+if grep -q 'GATE1_MAX_JOBS="${GATE1_MAX_JOBS:-' "$GATE1_FILE"; then
+	fail gate1_caller_can_raise "gate1 must NOT allow caller to raise max via GATE1_MAX_JOBS env var"
+fi
+
+# 9e: Validation mode - must run all test cases, not exit after first
+if ! grep -q "GATE1_TEST_JOBS_VALIDATION" "$GATE1_FILE"; then
+	fail gate1_missing_validation_mode "gate1 must support GATE1_TEST_JOBS_VALIDATION mode"
+fi
+
+# 9f: Validation mode - must aggregate results (test_pass/test_fail counters)
+if ! grep -q "test_pass" "$GATE1_FILE" || ! grep -q "test_fail" "$GATE1_FILE"; then
+	fail gate1_validation_no_aggregation "validation mode must aggregate all test results"
+fi
+
+# 9g: Negative mutation - err_release_helper must NOT dereference gpsDeviceData after kfree
+# Extract err_release_helper block and verify state is cached BEFORE kfree
+ERR_RELEASE_HELPER_BLOCK=$(sed -n '/^err_release_helper:/,/^[a-z_]*:/p' "$DC_FILE" | head -n -1)
+# Check that there's a variable assignment (bShouldModulePut or similar) before kfree
+if ! echo "$ERR_RELEASE_HELPER_BLOCK" | grep -q "kfree(gpsDeviceData)"; then
+	fail err_release_helper_missing_kfree "err_release_helper must call kfree(gpsDeviceData)"
+fi
+# Verify that the module_put condition does NOT reference gpsDeviceData->eFBState
+# after kfree. Instead, it should use a cached boolean.
+MODULE_PUT_LINE=$(echo "$ERR_RELEASE_HELPER_BLOCK" | grep -A2 "kfree(gpsDeviceData)" | grep "module_put")
+if echo "$MODULE_PUT_LINE" | grep -q "gpsDeviceData->eFBState"; then
+	fail err_release_helper_uaf "err_release_helper must NOT dereference gpsDeviceData->eFBState after kfree (use-after-free)"
+fi
+# Verify that state is cached before kfree (look for assignment pattern before kfree)
+if ! echo "$ERR_RELEASE_HELPER_BLOCK" | awk '/kfree\(gpsDeviceData\)/{exit} 1' | grep -qE "(bShouldModulePut|bCacheState|eCachedState)\s*="; then
+	fail err_release_helper_no_cache "err_release_helper must cache state before kfree to prevent use-after-free"
+fi
+
+# 9h: Negative mutation - gate1 must detect PF_GATE1_JOBS presence, not emptiness
+# An explicitly empty override must fail validation, while unset uses bounded default
+if ! grep -q '${PF_GATE1_JOBS+x}' "$GATE1_FILE"; then
+	fail gate1_jobs_presence_detection "gate1 must use \${PF_GATE1_JOBS+x} to detect presence (not -n for non-empty)"
+fi
+
 echo "PASS gate2 dc_sun4i structure validated"
 echo "  dc_sun4i.c: $(wc -l < "$DC_FILE") lines"
 echo "  Kbuild.mk: $(wc -l < "$KBUILD_FILE") lines"
 echo "  DC API functions: 12/12 present"
+echo "  Lifecycle: teardown ordering, psOwner cached, discovery protected, success path verified"
+echo "  fb_release: shared helper with sFBLock serialization, exactly-once claim, returns bool"
+echo "  Safe unrelease: conditional module_put in exit, no unbalance on FB_RELEASE_TERMINAL"
+echo "  Notifier: registered BEFORE publication, calls shared helper, fails closed"
+echo "  Exit: release BEFORE notifier unregister, conditional module_put, WARN on terminal leak"
 echo "  Build integration: Makefile + build-sunxi-a133.sh"
+echo "  Gate1 bound: GATE1_HARD_MAX_JOBS immutable, resolve_jobs helper, validation mode"
