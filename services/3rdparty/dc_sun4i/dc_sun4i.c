@@ -42,15 +42,17 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 /*!
  * dc_sun4i: fbdev-to-PVR-DC bridge for sun4i-drm on Linux 7.2
  *
- * This module binds to the fbdev device exposed by sun4i-drm's fbdev emulation
- * (registered_fb[0] when CONFIG_DRM_FBDEV_EMULATION=y, which defaults to
- * CONFIG_FB=y). It implements the PVR Display Class API to allow the closed
- * usermode DDK blobs to present rendered frames through the sun4i-drm scanout.
+ * This module binds to the fbdev device exposed by sun4i-drm's fbdev emulation.
+ * It discovers the fb_info through the public DRM path (drm_device->fb_helper->info)
+ * rather than the private registered_fb[] array (which became private in Linux 7.2).
+ *
+ * The module implements the PVR Display Class API to allow the closed usermode
+ * DDK blobs to present rendered frames through the sun4i-drm scanout.
  *
  * Design seam: DRM fbdev emulation (not KMS atomic). Evidence:
- *   - sun4i-drm uses DRM_FBDEV_DMA_DRIVER_OPS which populates registered_fb[]
- *   - dc_sunxi (4.9 BSP) uses the same fbdev seam successfully
- *   - Build system checks CONFIG_FB; falls back to dc_null if absent
+ *   - sun4i-drm uses DRM_FBDEV_DMA_DRIVER_OPS which creates fb_helper
+ *   - dc_sunxi (4.9 BSP) used registered_fb[] directly; 7.2 requires DRM path
+ *   - Build system checks CONFIG_DRM_FBDEV_EMULATION; falls back to dc_null if absent
  *   - KMS atomic would require rewriting the entire DC API against drm_crtc/
  *     drm_plane, which is a much larger change with no standalone acceptance
  *     value in one bounded worker.
@@ -62,6 +64,11 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <linux/console.h>
 #include <linux/module.h>
 #include <linux/fb.h>
+#include <linux/of.h>
+#include <linux/of_platform.h>
+#include <linux/platform_device.h>
+#include <drm/drm_device.h>
+#include <drm/drm_fb_helper.h>
 
 #include "kerneldisplay.h"
 #include "powervr/imgpixfmts.h"
@@ -113,6 +120,65 @@ DC_SUN4I_BUFFER;
 
 static DC_SUN4I_DEVICE *gpsDeviceData;
 
+/*
+ * dc_sun4i_find_fb_info - Discover fb_info via DRM device on Linux 7.2+
+ *
+ * In Linux 7.2, registered_fb[] is private to fbdev-core. We discover the
+ * fb_info through the public DRM path: find the sun4i-drm platform device,
+ * get its drm_device, and access fb_helper->info.
+ *
+ * Returns fb_info pointer on success, NULL on failure.
+ */
+static struct fb_info *dc_sun4i_find_fb_info(void)
+{
+	struct device_node *np;
+	struct platform_device *pdev;
+	struct device *dev;
+	struct drm_device *drm;
+	struct fb_info *info = NULL;
+
+	/* Find the sun4i-drm device by compatible string */
+	np = of_find_compatible_node(NULL, NULL, "allwinner,sun4i-a10-display-engine");
+	if (!np) {
+		/* Try A33-specific compatible */
+		np = of_find_compatible_node(NULL, NULL, "allwinner,sun8i-a33-display-engine");
+	}
+	if (!np) {
+		pr_err("dc_sun4i: no compatible sun4i-drm device found\n");
+		return NULL;
+	}
+
+	/* Get the platform device from the device node */
+	pdev = of_find_device_by_node(np);
+	of_node_put(np);
+	if (!pdev) {
+		pr_err("dc_sun4i: no platform device for sun4i-drm\n");
+		return NULL;
+	}
+
+	/* Get the drm_device from platform device drvdata */
+	dev = &pdev->dev;
+	drm = dev_get_drvdata(dev);
+	if (!drm) {
+		pr_err("dc_sun4i: no drm_device in drvdata\n");
+		return NULL;
+	}
+
+	/* Access fb_info through drm_fb_helper (public fields) */
+	if (!drm->fb_helper) {
+		pr_err("dc_sun4i: no fb_helper in drm_device\n");
+		return NULL;
+	}
+
+	info = drm->fb_helper->info;
+	if (!info) {
+		pr_err("dc_sun4i: no fb_info in fb_helper\n");
+		return NULL;
+	}
+
+	return info;
+}
+
 
 static
 void DC_SUN4I_GetInfo(IMG_HANDLE hDeviceData,
@@ -147,8 +213,8 @@ PVRSRV_ERROR DC_SUN4I_PanelQuery(IMG_HANDLE hDeviceData,
 	struct fb_var_screeninfo *psVar = &psDeviceData->psLINFBInfo->var;
 	struct fb_var_screeninfo sVar = { .pixclock = 0 };
 
-	if(!lock_fb_info(psDeviceData->psLINFBInfo))
-		return PVRSRV_ERROR_RETRY;
+	/* Linux 7.2: lock_fb_info is void, always succeeds */
+	lock_fb_info(psDeviceData->psLINFBInfo);
 
 	*pui32NumPanels = 1;
 
@@ -224,8 +290,8 @@ PVRSRV_ERROR DC_SUN4I_DimQuery(IMG_HANDLE hDeviceData,
 	struct fb_var_screeninfo *psVar = &psDeviceData->psLINFBInfo->var;
 	int i;
 
-	if(!lock_fb_info(psDeviceData->psLINFBInfo))
-		return PVRSRV_ERROR_RETRY;
+	/* Linux 7.2: lock_fb_info is void, always succeeds */
+	lock_fb_info(psDeviceData->psLINFBInfo);
 
 	for(i = 0; i < ui32NumDims; i++)
 	{
@@ -285,11 +351,8 @@ DC_SUN4I_ContextConfigureCheck(IMG_HANDLE hDisplayContext,
 		goto err_out;
 	}
 
-	if(!lock_fb_info(psDeviceData->psLINFBInfo))
-	{
-		eError = PVRSRV_ERROR_RETRY;
-		goto err_out;
-	}
+	/* Linux 7.2: lock_fb_info is void, always succeeds */
+	lock_fb_info(psDeviceData->psLINFBInfo);
 
 	psBuffer = ahBuffers[0];
 
@@ -363,10 +426,8 @@ void DC_SUN4I_ContextConfigure(IMG_HANDLE hDisplayContext,
 	DC_FBDEV_Clean(hDisplayContext, ahBuffers);
 #endif
 
-	if (!lock_fb_info(psDeviceData->psLINFBInfo))
-	{
-		return;
-	}
+	/* Linux 7.2: lock_fb_info is void, always succeeds */
+	lock_fb_info(psDeviceData->psLINFBInfo);
 
 	console_lock();
 
@@ -679,17 +740,17 @@ static int __init DC_SUN4I_init(void)
 	IMG_PIXFMT ePixFormat;
 	int err = -ENODEV;
 
-	psLINFBInfo = registered_fb[0];
+	/* Linux 7.2: Discover fb_info via DRM device path */
+	psLINFBInfo = dc_sun4i_find_fb_info();
 	if(!psLINFBInfo)
 	{
-		pr_err("No Linux framebuffer (fbdev) device is registered!\n"
-			   "Check you have a framebuffer driver compiled into your "
-			   "kernel\nand that it is enabled on the cmdline.\n");
+		pr_err("No Linux framebuffer (fbdev) device found via DRM!\n"
+			   "Check that sun4i-drm is loaded and fbdev emulation is enabled.\n");
 		goto err_out;
 	}
 
-	if(!lock_fb_info(psLINFBInfo))
-		goto err_out;
+	/* Linux 7.2: lock_fb_info is void, always succeeds */
+	lock_fb_info(psLINFBInfo);
 
 	console_lock();
 
@@ -822,6 +883,7 @@ static void __exit DC_SUN4I_exit(void)
 	DC_SUN4I_DEVICE *psDeviceData = gpsDeviceData;
 	struct fb_info *psLINFBInfo = psDeviceData->psLINFBInfo;
 
+	/* Linux 7.2: lock_fb_info is void, always succeeds */
 	lock_fb_info(psLINFBInfo);
 	console_lock();
 

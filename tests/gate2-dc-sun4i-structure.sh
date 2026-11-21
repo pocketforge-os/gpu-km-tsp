@@ -44,8 +44,10 @@ grep -q "DCRegisterDevice(&sDCFunctions" "$DC_FILE" || fail missing_DCRegisterDe
 # Check DCDisplayConfigurationRetired call (flip completion)
 grep -q "DCDisplayConfigurationRetired" "$DC_FILE" || fail missing_DCDisplayConfigurationRetired
 
-# Check fbdev binding
-grep -q "registered_fb\[0\]" "$DC_FILE" || fail missing_registered_fb_binding
+# Check DRM-based fb_info discovery (Linux 7.2+ requirement)
+grep -q "dc_sun4i_find_fb_info" "$DC_FILE" || fail missing_fb_info_discovery
+grep -q "of_find_compatible_node" "$DC_FILE" || fail missing_of_find_compatible_node
+grep -q "drm->fb_helper->info" "$DC_FILE" || fail missing_drm_fb_helper_access
 
 # Check CONFIG_DRM_FBDEV_EMULATION guard
 grep -q "#if !defined(CONFIG_DRM_FBDEV_EMULATION)" "$DC_FILE" || fail missing_CONFIG_DRM_FBDEV_EMULATION_guard
