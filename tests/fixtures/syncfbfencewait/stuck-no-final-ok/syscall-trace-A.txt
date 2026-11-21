@@ -1,0 +1,6 @@
+pid=100 function=ioctl phase=before fd=5 bridge_seq=1 bridge_id=24 bridge_func_id=5 in_size=12 out_size=4 in_hex=120000000000000000000000
+pid=100 function=ioctl phase=after fd=5 bridge_seq=1 bridge_id=24 bridge_func_id=5 in_size=12 out_size=4 out_hex=09000000
+pid=100 function=ioctl phase=before fd=5 bridge_seq=2 bridge_id=24 bridge_func_id=5 in_size=12 out_size=4 in_hex=120000000000000000000000
+pid=100 function=ioctl phase=after fd=5 bridge_seq=2 bridge_id=24 bridge_func_id=5 in_size=12 out_size=4 out_hex=09000000
+pid=100 function=ioctl phase=before fd=5 bridge_seq=3 bridge_id=24 bridge_func_id=5 in_size=12 out_size=4 in_hex=120000000000000000000000
+pid=100 function=ioctl phase=after fd=5 bridge_seq=3 bridge_id=24 bridge_func_id=5 in_size=12 out_size=4 out_hex=09000000

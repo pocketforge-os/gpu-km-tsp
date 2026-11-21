@@ -1,0 +1,2 @@
+pid=200 function=ioctl phase=before fd=5 bridge_seq=1 bridge_id=10 bridge_func_id=3 in_size=8 out_size=4 in_hex=0000000000000000
+pid=200 function=ioctl phase=after fd=5 bridge_seq=1 bridge_id=10 bridge_func_id=3 in_size=8 out_size=4 out_hex=00000000
