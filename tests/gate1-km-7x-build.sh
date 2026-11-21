@@ -13,7 +13,12 @@
 #   8. Build PVR modules against the output directory (fatal modpost)
 #   9. Record all hashes: source commit, config, symvers, modules
 #  10. Recheck source HEAD/config after build (race detection)
-#  11. KERNELDIR source tree is never mutated (all build output in temp)
+#  11. KERNELDIR source tree is NEVER mutated (read-only: git identity + .config)
+#
+# KERNELDIR IMMUTABILITY:
+#   This gate only READS from KERNELDIR: git rev-parse, git diff, .config hash.
+#   All build output goes to a private temp directory. No files are created,
+#   modified, or deleted in KERNELDIR.
 #
 # Usage: tests/gate1-km-7x-build.sh [KERNEL_SOURCE_DIR]
 set -euo pipefail
@@ -21,9 +26,47 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 KERNELDIR="${1:-$(cd "$HERE/../kernel-sunxi-7.x" && pwd)}"
 export CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
 NM="${CROSS_COMPILE}nm"
-JOBS="${PF_GATE1_JOBS:-$(nproc)}"
+
+# Bounded build concurrency: cap at 8 to avoid memory pressure
+# Validate PF_GATE1_JOBS: must be positive integer, capped at GATE1_MAX_JOBS (default 8)
+GATE1_MAX_JOBS="${GATE1_MAX_JOBS:-8}"
+if [ -n "${PF_GATE1_JOBS:-}" ]; then
+	# Validate: must be a positive integer
+	if ! [[ "$PF_GATE1_JOBS" =~ ^[1-9][0-9]*$ ]]; then
+		echo "FAIL gate1 reason=invalid_jobs PF_GATE1_JOBS=$PF_GATE1_JOBS (must be positive integer)" >&2
+		exit 1
+	fi
+	# Cap at maximum
+	if [ "$PF_GATE1_JOBS" -gt "$GATE1_MAX_JOBS" ]; then
+		echo "gate1: capping PF_GATE1_JOBS=$PF_GATE1_JOBS to max=$GATE1_MAX_JOBS" >&2
+		JOBS="$GATE1_MAX_JOBS"
+	else
+		JOBS="$PF_GATE1_JOBS"
+	fi
+else
+	# Default: min(nproc, GATE1_MAX_JOBS)
+	NCPU=$(nproc)
+	if [ "$NCPU" -gt "$GATE1_MAX_JOBS" ]; then
+		JOBS="$GATE1_MAX_JOBS"
+	else
+		JOBS="$NCPU"
+	fi
+fi
 
 START_TIME=$(date +%s)
+
+# Negative tests: validate job bounds without running full build
+# These tests ensure invalid input is rejected before any work starts
+if [ "${GATE1_TEST_JOBS_VALIDATION:-0}" = "1" ]; then
+	# Test invalid (non-numeric) PF_GATE1_JOBS
+	PF_GATE1_JOBS="abc" bash "$0" "${KERNELDIR:-}" 2>&1 | grep -q "invalid_jobs" && exit 0 || exit 1
+	# Test zero jobs
+	PF_GATE1_JOBS="0" bash "$0" "${KERNELDIR:-}" 2>&1 | grep -q "invalid_jobs" && exit 0 || exit 1
+	# Test negative jobs
+	PF_GATE1_JOBS="-1" bash "$0" "${KERNELDIR:-}" 2>&1 | grep -q "invalid_jobs" && exit 0 || exit 1
+	echo "PASS gate1 jobs validation tests"
+	exit 0
+fi
 
 # Create private temp work directory (never a fixed path)
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/gate1-XXXXXX")"
@@ -48,14 +91,6 @@ echo "gate1: KERNELDIR=$KERNELDIR (identity source only)" >&2
 
 src_commit=$(git -C "$KERNELDIR" rev-parse HEAD 2>/dev/null) || fail cannot_get_source_commit
 echo "gate1: src_commit=$src_commit" >&2
-
-# Clean up any stale gate1 artifacts from previous runs in KERNELDIR
-for stale in Module.symvers.gate1; do
-	if [ -f "$KERNELDIR/$stale" ]; then
-		rm -f "$KERNELDIR/$stale"
-		echo "gate1: removed stale artifact $stale" >&2
-	fi
-done
 
 # Reject tracked/staged dirt (source identity must be stable)
 if ! git -C "$KERNELDIR" diff --quiet 2>/dev/null; then
@@ -298,6 +333,7 @@ echo "    modules_symvers_sha256=$modules_symvers_sha256"
 echo "    final_module_symvers_sha256=$final_symvers_sha256"
 echo "    race_detection=passed"
 echo "    caller_tree_unmutated=true"
+echo "    build_jobs=$JOBS (max=$GATE1_MAX_JOBS)"
 echo "    wall_time_seconds=$WALL_TIME"
 echo "  MODULES:"
 echo "    pvrsrvkm.ko: vermagic=$vm_pvrsrvkm sha256=$pvrsrvkm_sha256"
@@ -308,3 +344,13 @@ echo "    kernel_exports=$kernel_export_count"
 echo "    Private symbols: NONE (verified registered_fb, get_fb_info, put_fb_info absent)"
 echo "    Undefined symbols: dc_sun4i=$dc_sun4i_count pvrsrvkm=$pvrsrvkm_count (all CRC-verified via modpost)"
 echo "    Name verification: supplementary check confirms all undefined symbols exist in Module.symvers"
+
+# =====================================================================
+# STEP 9: Structural immutability assertion
+# =====================================================================
+# Verify this script never writes to KERNELDIR (structural assertion)
+# Check for: rm, cp, mv, or output redirection targeting $KERNELDIR
+SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+if grep -E '(rm|cp|mv|>|>>).*\$KERNELDIR' "$SCRIPT_PATH" 2>/dev/null | grep -v "^#" | grep -v "git -C.*KERNELDIR" | grep -v "grep.*KERNELDIR" | grep -v "sha256sum.*KERNELDIR" | grep -v "cat.*KERNELDIR" | grep -v "read.*KERNELDIR" | grep -vE '^\s*#'; then
+	fail gate1_mutates_kerneldir "script must not write to KERNELDIR"
+fi

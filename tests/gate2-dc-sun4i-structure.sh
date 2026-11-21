@@ -99,21 +99,25 @@ fi
 if ! grep -q "err_release_data:" "$DC_FILE"; then
 	fail missing_err_release_data_label
 fi
+if ! grep -q "err_module_put:" "$DC_FILE"; then
+	fail missing_err_module_put_label "must have separate label for after try_module_get but before kzalloc"
+fi
 if ! grep -q "err_unlock:" "$DC_FILE"; then
 	fail missing_err_unlock_label
 fi
 
-# Verify teardown ordering: err_release_helper BEFORE err_release_data BEFORE err_unlock (in init)
+# Verify teardown ordering: err_release_helper BEFORE err_release_data BEFORE err_module_put BEFORE err_unlock
 init_block=$(sed -n '/^static int __init DC_SUN4I_init/,/^}/p' "$DC_FILE")
 helper_line=$(echo "$init_block" | grep -n "^err_release_helper:" | head -1 | cut -d: -f1)
 data_line=$(echo "$init_block" | grep -n "^err_release_data:" | head -1 | cut -d: -f1)
+module_put_line=$(echo "$init_block" | grep -n "^err_module_put:" | head -1 | cut -d: -f1)
 unlock_line=$(echo "$init_block" | grep -n "^err_unlock:" | head -1 | cut -d: -f1)
-if [ -n "$helper_line" ] && [ -n "$data_line" ] && [ -n "$unlock_line" ]; then
-	if [ "$helper_line" -ge "$data_line" ] || [ "$data_line" -ge "$unlock_line" ]; then
-		fail teardown_order_wrong "helper=$helper_line data=$data_line unlock=$unlock_line (expected helper<data<unlock)"
+if [ -n "$helper_line" ] && [ -n "$data_line" ] && [ -n "$module_put_line" ] && [ -n "$unlock_line" ]; then
+	if [ "$helper_line" -ge "$data_line" ] || [ "$data_line" -ge "$module_put_line" ] || [ "$module_put_line" -ge "$unlock_line" ]; then
+		fail teardown_order_wrong "helper=$helper_line data=$data_line module_put=$module_put_line unlock=$unlock_line (expected helper<data<module_put<unlock)"
 	fi
 else
-	fail teardown_labels_missing "helper=$helper_line data=$data_line unlock=$unlock_line"
+	fail teardown_labels_missing "helper=$helper_line data=$data_line module_put=$module_put_line unlock=$unlock_line"
 fi
 
 # Verify validation errors in init go to err_unlock (before kzalloc, no fb_release needed)
@@ -298,8 +302,7 @@ fi
 grep -q "struct notifier_block.*sUnbindNotifier" "$DC_FILE" || fail missing_notifier_block_field
 grep -q "struct platform_device.*psPlatformDev" "$DC_FILE" || fail missing_platform_dev_field
 grep -q "struct mutex.*sFBLock" "$DC_FILE" || fail missing_fb_lock_field
-grep -q "bool.*bFBOpened" "$DC_FILE" || fail missing_fb_opened_flag
-grep -q "bool.*bFBReleased" "$DC_FILE" || fail missing_fb_released_flag
+grep -q "enum eFBReleaseState.*eFBState" "$DC_FILE" || fail missing_fb_state_field
 grep -q "bool.*bNotifierRegistered" "$DC_FILE" || fail missing_notifier_registered_flag
 
 # 8d: Notifier registered in init BEFORE DCRegisterDevice
@@ -346,12 +349,17 @@ if ! echo "$helper_block" | grep -q "unlock_fb_info"; then
 	fail helper_missing_unlock_fb_info "shared helper must call unlock_fb_info"
 fi
 
-# 8h: Exactly-once claim under sFBLock
-if ! echo "$helper_block" | grep -q "bFBReleased = true"; then
-	fail helper_missing_claim "shared helper must set bFBReleased=true atomically under sFBLock"
+# 8h: Exactly-once claim under sFBLock (state machine)
+# Helper must check eFBState == FB_OPENED before claiming
+if ! echo "$helper_block" | grep -q "eFBState != FB_OPENED"; then
+	fail helper_missing_state_check "shared helper must check eFBState == FB_OPENED"
 fi
-if ! echo "$helper_block" | grep -q "bFBOpened"; then
-	fail helper_missing_fb_opened_check "shared helper must check bFBOpened"
+# Helper must set state to FB_RELEASE_IN_PROGRESS (claim) then FB_RELEASED (success)
+if ! echo "$helper_block" | grep -q "eFBState = FB_RELEASE_IN_PROGRESS"; then
+	fail helper_missing_claim "shared helper must set eFBState = FB_RELEASE_IN_PROGRESS"
+fi
+if ! echo "$helper_block" | grep -q "eFBState = FB_RELEASED"; then
+	fail helper_missing_released "shared helper must set eFBState = FB_RELEASED after fb_release"
 fi
 
 # 8i: Mutex initialization
@@ -379,13 +387,13 @@ else
 	fail notifier_failure_not_fatal "bus_register_notifier failure must goto err_release_helper"
 fi
 
-# 8n: Negative mutation - exit must NOT call bus_unregister_notifier while holding locks
-# Verify exit calls bus_unregister_notifier BEFORE dc_sun4i_fb_release_once
-exit_unreg_line=$(echo "$exit_block" | grep -n "bus_unregister_notifier" | head -1 | cut -d: -f1)
+# 8n: Negative mutation - exit must call dc_sun4i_fb_release_once BEFORE bus_unregister_notifier
+# This closes the race window: release while notifier coverage is still installed
 exit_release_line=$(echo "$exit_block" | grep -n "dc_sun4i_fb_release_once" | head -1 | cut -d: -f1)
-if [ -n "$exit_unreg_line" ] && [ -n "$exit_release_line" ]; then
-	if [ "$exit_unreg_line" -ge "$exit_release_line" ]; then
-		fail exit_notifier_before_release "bus_unregister_notifier=$exit_unreg_line must be BEFORE dc_sun4i_fb_release_once=$exit_release_line"
+exit_unreg_line=$(echo "$exit_block" | grep -n "bus_unregister_notifier" | head -1 | cut -d: -f1)
+if [ -n "$exit_release_line" ] && [ -n "$exit_unreg_line" ]; then
+	if [ "$exit_release_line" -ge "$exit_unreg_line" ]; then
+		fail exit_release_after_unregister "dc_sun4i_fb_release_once=$exit_release_line must be BEFORE bus_unregister_notifier=$exit_unreg_line"
 	fi
 fi
 
@@ -393,6 +401,41 @@ fi
 if echo "$helper_block" | grep -q "bus_unregister_notifier"; then
 	fail helper_should_not_unregister "shared helper must NOT call bus_unregister_notifier (would deadlock)"
 fi
+
+# 8p: Negative mutation - err_unlock must NOT call module_put (pre-acquisition path)
+# err_unlock handles validation errors and failed try_module_get, before module ref is owned
+err_unlock_block=$(echo "$init_block" | sed -n '/^err_unlock:/,/^[^[:space:]]/p' | head -10)
+if echo "$err_unlock_block" | grep -q "module_put"; then
+	fail err_unlock_calls_module_put "err_unlock must NOT call module_put (pre-acquisition: no module ref owned)"
+fi
+
+# 8q: Negative mutation - err_module_put must call module_put (post-acquisition, pre-kzalloc)
+err_module_put_block=$(echo "$init_block" | sed -n '/^err_module_put:/,/^err_unlock:/p')
+if ! echo "$err_module_put_block" | grep -q "module_put"; then
+	fail err_module_put_missing_module_put "err_module_put must call module_put (owns module ref from try_module_get)"
+fi
+
+# 8r: Negative mutation - try_module_get failure must NOT go to a label that calls module_put
+# Find the try_module_get block and check its goto target
+try_get_block=$(echo "$init_block" | sed -n '/try_module_get/,/^[[:space:]]*}$/p' | head -5)
+try_get_goto=$(echo "$try_get_block" | grep "goto" | head -1 | sed 's/.*goto \([^;]*\).*/\1/')
+# The goto target must be err_unlock (which does NOT call module_put)
+if [ "$try_get_goto" != "err_unlock" ]; then
+	fail try_module_get_wrong_target "try_module_get failure must goto err_unlock (not $try_get_goto)"
+fi
+
+# 8s: State machine - helper must set FB_RELEASE_TERMINAL when drm_dev_enter fails
+if ! echo "$helper_block" | grep -q "eFBState = FB_RELEASE_TERMINAL"; then
+	fail helper_missing_terminal_state "shared helper must set FB_RELEASE_TERMINAL when drm_dev_enter fails"
+fi
+
+# 8t: State machine enum must exist with all states
+grep -q "enum eFBReleaseState" "$DC_FILE" || fail missing_fb_state_enum
+grep -q "FB_NONE" "$DC_FILE" || fail missing_fb_state_none
+grep -q "FB_OPENED" "$DC_FILE" || fail missing_fb_state_opened
+grep -q "FB_RELEASE_IN_PROGRESS" "$DC_FILE" || fail missing_fb_state_in_progress
+grep -q "FB_RELEASED" "$DC_FILE" || fail missing_fb_state_released
+grep -q "FB_RELEASE_TERMINAL" "$DC_FILE" || fail missing_fb_state_terminal
 
 echo "PASS gate2 dc_sun4i structure validated"
 echo "  dc_sun4i.c: $(wc -l < "$DC_FILE") lines"
