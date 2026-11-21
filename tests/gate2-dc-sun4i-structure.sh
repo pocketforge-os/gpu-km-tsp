@@ -218,9 +218,9 @@ fi
 
 # Test 5: Negative mutation test - verify no code path after success can reach err_drm_put via fall-through
 # The success path ends with "return 0;" which exits the function, so no fall-through is possible
-# Verify that between "return 0;" and "err_kfree:" there is only whitespace/comments
-# Use awk to extract lines after "return 0;" and before "err_kfree:"
-between=$(echo "$init_block" | awk '/return 0;/{found=1; next} /^err_kfree:/{exit} found{print}')
+# Verify that between "return 0;" and the first error label (err_put_device:) there is only whitespace/comments
+# Use awk to extract lines after "return 0;" and before "err_put_device:"
+between=$(echo "$init_block" | awk '/return 0;/{found=1; next} /^err_put_device:/{exit} found{print}')
 # Strip out multi-line comments, single-line comments, empty lines
 stripped=$(echo "$between" | sed '/\/\*/,/\*\//d' | sed '/^[[:space:]]*\/\//d' | sed '/^[[:space:]]*$/d' | sed '/^[[:space:]]*\*/d')
 if [ -n "$stripped" ]; then
@@ -229,9 +229,9 @@ fi
 
 # Test 6: Verify error paths use correct goto targets
 # Validation errors should goto err_unlock (releases locks then falls through to drm_exit/drm_put)
-# DCRegisterDevice failure should goto err_kfree (frees device, then falls through)
-if ! echo "$init_block" | grep -q "goto err_kfree"; then
-	fail missing_goto_err_kfree "DCRegisterDevice failure must goto err_kfree"
+# DCRegisterDevice failure should goto err_put_device (releases device ref, then falls through to kfree)
+if ! echo "$init_block" | grep -q "goto err_put_device"; then
+	fail missing_goto_err_put_device "DCRegisterDevice failure must goto err_put_device"
 fi
 if ! echo "$init_block" | grep -q "goto err_unlock"; then
 	fail missing_goto_err_unlock "validation errors must goto err_unlock"
@@ -274,9 +274,59 @@ BUILD_SCRIPT="$HERE/build-sunxi-a133.sh"
 grep -q "PVR_DC_SUN4I" "$BUILD_SCRIPT" || fail missing_PVR_DC_SUN4I_in_build_script
 grep -q "dc_sun4i.ko" "$BUILD_SCRIPT" || fail missing_dc_sun4i.ko_in_build_script
 
+# Test 8: fb_release notifier lifecycle - structural verification
+# Provider unbind notifier ensures fb_release runs before sun4i-drm teardown
+
+# 8a: Notifier callback function exists
+grep -q "dc_sun4i_unbind_notifier" "$DC_FILE" || fail missing_unbind_notifier_function
+
+# 8b: Notifier fields in DC_SUN4I_DEVICE struct
+grep -q "struct notifier_block.*sUnbindNotifier" "$DC_FILE" || fail missing_notifier_block_field
+grep -q "struct platform_device.*psPlatformDev" "$DC_FILE" || fail missing_platform_dev_field
+grep -q "struct mutex.*sFBLock" "$DC_FILE" || fail missing_fb_lock_field
+grep -q "bool.*bFBOpened" "$DC_FILE" || fail missing_fb_opened_flag
+grep -q "bool.*bFBReleased" "$DC_FILE" || fail missing_fb_released_flag
+grep -q "bool.*bNotifierRegistered" "$DC_FILE" || fail missing_notifier_registered_flag
+
+# 8c: Notifier registered in init after DCRegisterDevice
+grep -q "bus_register_notifier.*platform_bus_type" "$DC_FILE" || fail missing_bus_register_notifier
+
+# 8d: Notifier unregistered in exit (synchronizes with running callback)
+grep -q "bus_unregister_notifier.*platform_bus_type" "$DC_FILE" || fail missing_bus_unregister_notifier
+
+# 8e: Exactly-once release logic - check bFBReleased is tested before calling fb_release
+exit_block=$(sed -n '/^static void __exit DC_SUN4I_exit/,/^}/p' "$DC_FILE")
+if ! echo "$exit_block" | grep -q "fb_release_needed"; then
+	fail missing_fb_release_needed_check "exit must check if fb_release already done"
+fi
+if ! echo "$exit_block" | grep -q "bFBReleased = true"; then
+	fail missing_fb_released_set "exit must set bFBReleased after calling fb_release"
+fi
+
+# 8f: Mutex initialization and usage
+grep -q "mutex_init.*sFBLock" "$DC_FILE" || fail missing_mutex_init
+if ! echo "$exit_block" | grep -q "mutex_lock.*sFBLock"; then
+	fail missing_mutex_lock_in_exit "exit must use mutex for serialization"
+fi
+
+# 8g: Platform device reference balance
+grep -q "get_device.*psPlatformDev" "$DC_FILE" || fail missing_get_device
+grep -q "put_device.*psPlatformDev" "$DC_FILE" || fail missing_put_device
+
+# 8h: Notifier callback matches exact platform device
+notifier_block=$(sed -n '/^static int dc_sun4i_unbind_notifier/,/^}/p' "$DC_FILE")
+if ! echo "$notifier_block" | grep -q "dev != &psDeviceData->psPlatformDev->dev"; then
+	fail notifier_missing_device_match "notifier must match exact platform device"
+fi
+
+# 8i: Notifier handles BUS_NOTIFY_UNBIND_DRIVER action
+if ! echo "$notifier_block" | grep -q "BUS_NOTIFY_UNBIND_DRIVER"; then
+	fail notifier_missing_unbind_action "notifier must handle BUS_NOTIFY_UNBIND_DRIVER"
+fi
+
 echo "PASS gate2 dc_sun4i structure validated"
 echo "  dc_sun4i.c: $(wc -l < "$DC_FILE") lines"
 echo "  Kbuild.mk: $(wc -l < "$KBUILD_FILE") lines"
 echo "  DC API functions: 12/12 present"
-echo "  Lifecycle: teardown ordering (unlock<exit<put), psOwner cached, discovery protected, success path verified"
+echo "  Lifecycle: teardown ordering (unlock<exit<put), psOwner cached, discovery protected, success path verified, fb_release notifier"
 echo "  Build integration: Makefile + build-sunxi-a133.sh"
