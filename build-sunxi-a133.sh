@@ -49,25 +49,34 @@ fi
 #   - CONFIG_DRM_FBDEV_EMULATION + kernel 7.x+: dc_sun4i (sun4i-drm fbdev emulation)
 #   - CONFIG_DRM_FBDEV_EMULATION + kernel 4.9/5.x: dc_sunxi (legacy sunxi disp fbdev)
 #   - No CONFIG_DRM_FBDEV_EMULATION + kernel 4.9: dc_sunxi requires legacy CONFIG_FB
-# Explicit PVR_HEADLESS_NO_DC / PVR_DC_NULL / PVR_DC_SUN4I win.
+# Explicit PVR_HEADLESS_NO_DC / PVR_DC_NULL / PVR_DC_SUN4I win over automatic defaults.
 AUTCONF_H="$KERNELDIR/include/generated/autoconf.h"
 HAS_DRM_FBDEV_EMU=$(grep -q '^#define CONFIG_DRM_FBDEV_EMULATION 1$' "$AUTCONF_H" 2>/dev/null && echo 1 || echo 0)
 HAS_LEGACY_FB=$(grep -q '^#define CONFIG_FB 1$' "$AUTCONF_H" 2>/dev/null && echo 1 || echo 0)
 
-if [ "$HAS_DRM_FBDEV_EMU" -eq 0 ] && [ "$HAS_LEGACY_FB" -eq 0 ]; then
-    # No fbdev support at all; use dc_null (not headless + null conflict)
-    PVR_DC_NULL="${PVR_DC_NULL:-1}"
-else
-    # fbdev support present; check kernel version to choose dc_sun4i vs dc_sunxi
-    KERNEL_VERSION=$(make -C "$KERNELDIR" kernelversion 2>/dev/null | head -n1)
-    KERNEL_MAJOR=$(echo "$KERNEL_VERSION" | cut -d. -f1)
-    
-    # Default to dc_sun4i for kernel 6.x+ with DRM fbdev emulation
-    # Keep dc_sunxi for 4.9/5.x (legacy BSP with CONFIG_FB)
-    if [ "${KERNEL_MAJOR:-0}" -ge 6 ] && [ "$HAS_DRM_FBDEV_EMU" -eq 1 ]; then
-        PVR_DC_SUN4I="${PVR_DC_SUN4I:-1}"
+# Check if any explicit backend selector is already set
+EXPLICIT_SET=0
+[ -n "${PVR_HEADLESS_NO_DC:-}" ] && EXPLICIT_SET=1
+[ -n "${PVR_DC_NULL:-}" ] && EXPLICIT_SET=1
+[ -n "${PVR_DC_SUN4I:-}" ] && EXPLICIT_SET=1
+
+# Only apply automatic defaults if no explicit selector is set
+if [ "$EXPLICIT_SET" -eq 0 ]; then
+    if [ "$HAS_DRM_FBDEV_EMU" -eq 0 ] && [ "$HAS_LEGACY_FB" -eq 0 ]; then
+        # No fbdev support at all; use dc_null
+        PVR_DC_NULL=1
+    else
+        # fbdev support present; check kernel version to choose dc_sun4i vs dc_sunxi
+        KERNEL_VERSION=$(make -C "$KERNELDIR" kernelversion 2>/dev/null | head -n1)
+        KERNEL_MAJOR=$(echo "$KERNEL_VERSION" | cut -d. -f1)
+        
+        # Default to dc_sun4i for kernel 6.x+ with DRM fbdev emulation
+        # Keep dc_sunxi for 4.9/5.x (legacy BSP with CONFIG_FB)
+        if [ "${KERNEL_MAJOR:-0}" -ge 6 ] && [ "$HAS_DRM_FBDEV_EMU" -eq 1 ]; then
+            PVR_DC_SUN4I=1
+        fi
+        # For kernel < 6 or without DRM fbdev emulation, leave dc_sunxi as default
     fi
-    # For kernel < 6 or without DRM fbdev emulation, leave dc_sunxi as default
 fi
 
 echo "=== Building pvrsrvkm.ko for sunxi_a133 ==="

@@ -20,7 +20,7 @@ grep -q 'KERNEL_MAJOR=.*cut -d.' "$BUILD_SCRIPT" || fail missing_kernel_major_ex
 
 # Check build script selects dc_sun4i for kernel 6.x+ with DRM fbdev emulation
 grep -q 'KERNEL_MAJOR.*-ge 6.*HAS_DRM_FBDEV_EMU.*-eq 1' "$BUILD_SCRIPT" || fail missing_kernel_6_drm_fbdev_check
-grep -q 'PVR_DC_SUN4I=.*:-1' "$BUILD_SCRIPT" || fail missing_dc_sun4i_default_for_6x
+grep -q 'PVR_DC_SUN4I=1' "$BUILD_SCRIPT" || fail missing_dc_sun4i_default_for_6x
 
 # Check build script passes PVR_DC_SUN4I to make
 grep -q 'PVR_DC_SUN4I=.*PVR_DC_SUN4I' "$BUILD_SCRIPT" || fail missing_PVR_DC_SUN4I_pass_to_make
