@@ -852,6 +852,18 @@ static int __init DC_SUN4I_init(void)
 	}
 	err = -ENODEV; /* Reset for error paths below */
 
+	/* Protect all fb_info accesses with unplug synchronization.
+	 * Even though we just discovered the device, it could theoretically
+	 * be unplugged before we finish validation.
+	 */
+	int init_drm_idx;
+	if(!drm_dev_enter(psDRMDev, &init_drm_idx))
+	{
+		pr_err("dc_sun4i: DRM device unplugged during init\n");
+		drm_dev_put(psDRMDev);
+		goto err_out;
+	}
+
 	/* Linux 7.2: lock_fb_info is void, always succeeds */
 	lock_fb_info(psLINFBInfo);
 
@@ -939,20 +951,21 @@ static int __init DC_SUN4I_init(void)
 		goto err_module_put;
 	}
 
-	gpsDeviceData = kmalloc(sizeof(DC_SUN4I_DEVICE), GFP_KERNEL);
+	gpsDeviceData = kzalloc(sizeof(DC_SUN4I_DEVICE), GFP_KERNEL);
 	if(!gpsDeviceData)
 		goto err_module_put;
 
+	/* Set ALL fields BEFORE DCRegisterDevice to prevent publication race */
 	gpsDeviceData->psLINFBInfo = psLINFBInfo;
+	gpsDeviceData->psDRMDev = psDRMDev;
 	gpsDeviceData->ePixFormat = ePixFormat;
+	gpsDeviceData->bCanFlip = DC_SUN4I_FlipPossible(psLINFBInfo);
 
 	if(DCRegisterDevice(&sDCFunctions,
 						MAX_COMMANDS_IN_FLIGHT,
 						gpsDeviceData,
 						&gpsDeviceData->hSrvHandle) != PVRSRV_OK)
 		goto err_kfree;
-
-	gpsDeviceData->bCanFlip = DC_SUN4I_FlipPossible(psLINFBInfo);
 
 	pr_info("Found usable fbdev device (%s):\n"
 			"range (physical) = 0x%lx-0x%lx\n"
@@ -969,20 +982,16 @@ static int __init DC_SUN4I_init(void)
 			psLINFBInfo->var.xres_virtual, psLINFBInfo->var.yres_virtual,
 			ePixFormat, gpsDeviceData->bCanFlip);
 	err = 0;
-
-	/* Store DRM device in gpsDeviceData so exit() can release the ref.
-	 * On success, the ref ownership transfers to gpsDeviceData; we do NOT
-	 * release it here. Error paths release via err_drm_put.
-	 */
-	gpsDeviceData->psDRMDev = psDRMDev;
-	goto err_unlock; /* Success - skip all cleanup except lock release */
+	goto err_drm_exit; /* Success - skip cleanup, just release enter/locks */
 
 err_kfree:
 	kfree(gpsDeviceData);
 err_module_put:
 	module_put(psLINFBInfo->fbops->owner);
 err_drm_put:
-	drm_dev_put(psDRMDev);
+	drm_dev_put(psDRMDev);  /* Error path: release the drm_dev_get reference */
+err_drm_exit:
+	drm_dev_exit(init_drm_idx);  /* All paths: release drm_dev_enter */
 err_unlock:
 	console_unlock();
 	unlock_fb_info(psLINFBInfo);
@@ -995,8 +1004,19 @@ static void __exit DC_SUN4I_exit(void)
 	DC_SUN4I_DEVICE *psDeviceData = gpsDeviceData;
 	struct fb_info *psLINFBInfo = psDeviceData->psLINFBInfo;
 	struct drm_device *psDRMDev = psDeviceData->psDRMDev;
+	int drm_idx;
 
-	/* Linux 7.2: lock_fb_info is void, always succeeds */
+	/* Check if device is still plugged before accessing fb_info */
+	if(!drm_dev_enter(psDRMDev, &drm_idx)) {
+		/* Device unplugged - skip fb_info teardown, just unregister and free */
+		pr_info("dc_sun4i: DRM device unplugged during exit, skipping fb_release");
+		DCUnregisterDevice(psDeviceData->hSrvHandle);
+		kfree(psDeviceData);
+		drm_dev_put(psDRMDev);
+		return;
+	}
+
+	/* Device still plugged - safe to access fb_info */
 	lock_fb_info(psLINFBInfo);
 	console_lock();
 
@@ -1007,6 +1027,7 @@ static void __exit DC_SUN4I_exit(void)
 
 	console_unlock();
 	unlock_fb_info(psLINFBInfo);
+	drm_dev_exit(drm_idx);
 
 	DCUnregisterDevice(psDeviceData->hSrvHandle);
 	kfree(psDeviceData);
