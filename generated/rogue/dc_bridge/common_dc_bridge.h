@@ -175,7 +175,27 @@ typedef struct PVRSRV_BRIDGE_IN_DCGETINFO_TAG
 	IMG_HANDLE hDevice;
 } __attribute__ ((packed)) PVRSRV_BRIDGE_IN_DCGETINFO;
 
-/* Bridge out structure for DCGetInfo */
+/* Bridge out structure for DCGetInfo
+ *
+ * Layout (verified by tests/test-dcgetinfo-layout.c):
+ *   sDisplayInfo: offset 0, size 68 bytes
+ *     - DC_DISPLAY_INFO is NOT packed internally (see dc_external.h)
+ *     - szDisplayName[50] at offset 0
+ *     - 2 bytes padding to align ui32MinDisplayPeriod to 4-byte boundary
+ *     - ui32MinDisplayPeriod at offset 52
+ *     - ui32MaxDisplayPeriod at offset 56
+ *     - ui32MaxPipes at offset 60
+ *     - bUnlatchedSupported at offset 64
+ *   eError: offset 68, size 4 bytes
+ * Total: 72 bytes (no trailing padding due to __attribute__((packed)))
+ *
+ * The outer struct is packed, but DC_DISPLAY_INFO retains its natural alignment
+ * internally. The packed attribute on the outer struct only removes padding
+ * between members and trailing padding; it does not recursively pack inner
+ * structs. Therefore sizeof(PVRSRV_BRIDGE_OUT_DCGETINFO) = 68 + 4 = 72 bytes.
+ *
+ * This matches the UM ABI (UM allocates 72 bytes for this bridge out).
+ */
 typedef struct PVRSRV_BRIDGE_OUT_DCGETINFO_TAG
 {
 	DC_DISPLAY_INFO sDisplayInfo;
