@@ -313,9 +313,12 @@ static int sunxi_decide_pll(struct sunxi_platform *sunxi)
 #if defined(CONFIG_PM_OPP) && defined(CONFIG_OF)
 	const struct property *prop;
 	const __be32 *val;
-	int i = 0, j = 0, nr = 0;
+	int i = 0, nr = 0;
+#if defined(CONFIG_ARCH_SUN50IW10)
+	int j = 0;
 	unsigned long step = 0;
 	unsigned long core_clk[4];
+#endif
 	u32 val2;
 	int err;
 	sunxi->pll_clk_rate = 500000000;
@@ -326,12 +329,15 @@ static int sunxi_decide_pll(struct sunxi_platform *sunxi)
 	err = of_property_read_u32(sunxi->dev->of_node, "pll_rate", &val2);
 	if (!err)
 		sunxi->pll_clk_rate = val2 * 1000;
+#if defined(CONFIG_ARCH_SUN50IW10)
 	while (i < 4) {
 		core_clk[i] = sunxi->pll_clk_rate / (i + 1);
 		core_clk[i] /= 1000;
 		core_clk[i] *= 1000;
 		i++;
 	}
+	i = 0;
+#endif
 	prop = of_find_property(sunxi->dev->of_node, "operating-points", NULL);
 	if (!prop)
 		return -ENODEV;
@@ -358,12 +364,19 @@ static int sunxi_decide_pll(struct sunxi_platform *sunxi)
 	sunxi->clk_table[0].gpu_dfs = 0x08;
 
 	i = 0;
+#if defined(CONFIG_ARCH_SUN50IW10)
 	j = 0;
+#endif
 	val = prop->value;
 	while (nr) {
 		unsigned long freq = be32_to_cpup(val++) * 1000;
 		sunxi->clk_table[i].volt = be32_to_cpup(val++);
 		sunxi->clk_table[i].true_clk = freq;
+#if defined(CONFIG_ARCH_SUN50IW10)
+		/* Vendor 4.9: DFS register is written to GPU_CLK_CTRL_REG, so
+		 * the bucket algorithm must pick a core_clk that yields an
+		 * exact divider. OPPs not aligned to step = core_clk/16 are
+		 * rejected. */
 		while (freq < (core_clk[j] * GPU_DFS_MIN)/GPU_DFS_MAX && j < 4)
 			j++;
 		if (j >= 4) {
@@ -376,6 +389,19 @@ static int sunxi_decide_pll(struct sunxi_platform *sunxi)
 				core_clk[j], freq, sunxi->clk_table[i].volt, sunxi->clk_table[i].gpu_dfs);
 		if (freq % step)
 			dev_err(sunxi->dev, "%s: give us an error freq:%lu\n", __func__, freq);
+#else
+		/* Mainline A133: switch_interl_dfs() is a no-op because
+		 * GPU_CLK_CTRL_REG is outside the A133 GPU register window.
+		 * The bucket algorithm's core_clk selection is therefore dead
+		 * code that produces garbage dfs values and forces the GPU to
+		 * run at a frequency different from the OPP request when the
+		 * vendor OPPs (e.g. 700/399/228 MHz) don't align with the
+		 * pll_rate-derived step grid. Use the OPP frequency directly. */
+		sunxi->clk_table[i].core_clk = freq;
+		sunxi->clk_table[i].gpu_dfs = 0;
+		dev_info(sunxi->dev, "set gpu core rate:%lu freq:%lu-%luuV\n",
+				freq, freq, sunxi->clk_table[i].volt);
+#endif
 		nr -= 2;
 		i++;
 	}
